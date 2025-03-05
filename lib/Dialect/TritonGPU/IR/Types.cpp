@@ -33,7 +33,6 @@ Type MemDescType::parse(AsmParser &parser) {
 
   bool mutableMemory = false;      // optional
   SmallVector<int64_t> allocShape; // optional
-  bool hasAllocShape = false;
   if (succeeded(parser.parseOptionalComma())) {
     if (succeeded(parser.parseOptionalKeyword(kMutableMemory))) {
       mutableMemory = true;
@@ -42,24 +41,18 @@ Type MemDescType::parse(AsmParser &parser) {
                                              /*withTrailingX=*/false))) {
           return Type();
         }
-        else{
-          hasAllocShape = true;
-        }
       }
     } else if (failed(parser.parseDimensionList(allocShape,
                                                 /*allowDynamic=*/false,
                                                 /*withTrailingX=*/false))) {
       return Type();
     }
-    else{
-      hasAllocShape = true;
-    }
   }
 
   if (parser.parseGreater())
     return Type();
 
-  if(hasAllocShape)
+  if(allocShape.size() != 0)
     return MemDescType::get(parser.getContext(), dimensions, elementType,
                           encoding, memorySpace, mutableMemory, allocShape);
 
