@@ -157,13 +157,13 @@ import triton.language as tl
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 os.environ['TRITON_ALWAYS_COMPILE'] = '1'
-os.environ['TRITON_KERNEL_DUMP'] = '1'
-os.environ['TRITON_DUMP_DIR'] = 'dump'
+# os.environ['TRITON_KERNEL_DUMP'] = '1'
+# os.environ['TRITON_DUMP_DIR'] = 'dump'
 # os.environ['TRITON_PRINT_AUTOTUNING'] = '1'
 # os.environ['MLIR_ENABLE_DUMP'] = '1'
 #
-# os.environ['TRITON_KERNEL_OVERRIDE'] = '1'
-# os.environ['TRITON_OVERRIDE_DIR'] = 'modify'
+os.environ['TRITON_KERNEL_OVERRIDE'] = '1'
+os.environ['TRITON_OVERRIDE_DIR'] = 'modify'
 
 
 def is_cuda():
