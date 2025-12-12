@@ -86,7 +86,8 @@ if __name__ == "__main__" and not is_blackwell():
 # Note that when blockM=64, tensors with multiple blocks are packed in TMEM to
 # use all 128 rows. This can complicate slicing TMEM descriptors.
 #
-# The underlying `tcgen05.st` and `tcgen05.ld` instructions are warp-level
+# The underlying `tcgen05.st` and `tcgen0
+# 5.ld` instructions are warp-level
 # instructions that access TMEM in specific patterns. Combined with the warp
 # row-addressing restrictions, this gives rise to the register layout
 # restrictions on tensor memory. Certain tensor memory layouts support multiple

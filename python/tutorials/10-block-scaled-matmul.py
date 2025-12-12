@@ -372,8 +372,8 @@ def validate_block_scaled(M, N, K, block_scale_type="nvfp4"):
 
 def bench_block_scaled(K, block_scale_type="nvfp4", reps=10):
     assert K % 128 == 0
-    M = 8192
-    N = 8192
+    M = 4096
+    N = 4096
     print(f"Problem Shape = {M}x{N}x{K}")
 
     a_desc, a_scale, b_desc, b_scale, rep_m, rep_n, rep_k, configs, _ = initialize_block_scaled(

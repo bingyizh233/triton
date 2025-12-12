@@ -1,0 +1,10 @@
+{
+    "venvPath": "/home/scratch.bingyiz_gpu_2/projects/triton",
+    "venv": ".venv",
+    "pythonVersion": "3.12",
+    "extraPaths": [
+      "/home/scratch.bingyiz_gpu_2/projects/triton/python"
+    ]
+  }
+  
+  

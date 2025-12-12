@@ -42,105 +42,9 @@ def is_hopper_or_newer():
 if __name__ == "__main__" and not is_hopper_or_newer():
     raise RuntimeError("This tutorial requires Hopper or newer NVIDIA GPU")
 
-# %%
-# TMA is used through objects called "tensor descriptors". Tensor descriptors       
-# live in global memory and contain the shape, strides, base pointer, layout,
-# and other information about the tensor. TMA reads and writes are fundamentally
-# async, and we will need "mbarrier" objects to synchronize them.
-#
-# Kernels that use TMAs accept descriptors as kernel arguments, which we can use
-# to issue async tranfers:
 
 
-@gluon.jit
-def memcpy_1d_tma_kernel(in_desc, out_desc, XBLOCK: gl.constexpr):
-    # We don't need to pass the tensor strides because they are stored in the
-    # tensor descriptors
-    pid = gl.program_id(0)
 
-    # Each tensor descriptor contains a shared memory layout. Data is
-    # transferred between global and shared memory according to that layout.
-    smem_layout: gl.constexpr = in_desc.layout
-    smem = gl.allocate_shared_memory(in_desc.dtype, [XBLOCK], smem_layout)
-
-    # Completion of async TMA reads are tracked by mbarrier objects. These
-    # are 64-bit objects that live in shared memory.
-    #
-    # An mbarrier is initialized with a count. Each time a mbarrier is
-    # "arrived" on, the count is decremented. When the count reaches 0, the
-    # current phase of the mbarrier is marked as complete and it moves to the
-    # next phase. The mbarrier only tracks the state of the current and
-    # previous phase. This is important, because if an mbarrier's phase races
-    # too far ahead, its waiter will become out of sync.
-    bar = gl.allocate_shared_memory(gl.int64, [1], mbarrier.MBarrierLayout())
-
-    # Completion of an async TMA arrives on an mbarrier once. Thus, initialize
-    # the mbarrier with a count of 1 so its phase will complete when the TMA is
-    # complete.
-    mbarrier.init(bar, count=1)
-
-    # Tensor descriptors have an associated block shape. Each TMA request will
-    # copy one block of the tensor descriptor. The coordinates of the TMA
-    # request are specified as offsets to the beginning of the block. Masking
-    # of out-of-bounds reads and writes is handled automatically by TMAs, using
-    # the shape specified on the tensor descriptor.
-    gl.static_assert(in_desc.block_type == out_desc.block_type)
-    gl.static_assert(in_desc.layout == out_desc.layout)
-
-    # Track completion of the TMA read based on the number of bytes copied.
-    # mbarrier.expect sets the number of outstanding bytes tracked by the
-    # mbarrier. If we pass the barrier to the TMA copy, it will atomically
-    # decrement the number of outstanding bytes as transactions complete. When
-    # it reaches 0, the mbarrier is arrived on once.
-    mbarrier.expect(bar, in_desc.block_type.nbytes)
-    tma.async_copy_global_to_shared(in_desc, [pid * XBLOCK], bar, smem)
-
-    # Wait for completion of the read. We query the completion state of the
-    # mbarrier using the parity of the phase, i.e. either 0 or 1. mbarriers are
-    # initialized to parity 1 complete, so we wait for parity 0.
-    mbarrier.wait(bar, phase=0)
-
-    # When we are done using the mbarrier, we need to invalidate it.
-    mbarrier.invalidate(bar)
-
-    # Since the TMA store reads from shared memory, we don't even need to load
-    # the result into registers. We can just store the result directly.
-    tma.async_copy_shared_to_global(out_desc, [pid * XBLOCK], smem)
-
-    # Unlike TMA reads, the completion of TMA stores is tracked by commit
-    # groups, just like async copies. Each async TMA store is implicitly
-    # committed to an async store group. We can wait until there are at most
-    # `pendings` outstanding TMA stores using `store_wait`. Note that the commit
-    # groups for async copy and async TMA stores are separate.
-    tma.store_wait(pendings=0)
-
-
-def memcpy_1d_tma(input, output, XBLOCK=8192):
-    assert input.shape == output.shape
-
-    # The layout for a tensor descriptor is always an NVMMASharedLayout. We can
-    # use this helper to grab the default NVMMASharedLayout, but sometimes you
-    # might need a different layout.
-    block_shape = [XBLOCK]
-    layout = gl.NVMMASharedLayout.get_default_for(block_shape, gl.float32)
-
-    # Wrap the tensors in tensor descriptors.
-    in_desc = TensorDescriptor.from_tensor(input, block_shape, layout)
-    out_desc = TensorDescriptor.from_tensor(output, block_shape, layout)
-
-    grid = (triton.cdiv(input.numel(), XBLOCK), )
-    # Our kernel only uses scalars, so just a single warp is enough.
-    memcpy_1d_tma_kernel[grid](in_desc, out_desc, XBLOCK, num_warps=1)
-
-
-@pytest.mark.parametrize("XBLOCK", [64])
-@pytest.mark.parametrize("xnumel", [40, 500])
-@pytest.mark.skipif(not is_hopper_or_newer(), reason="Requires Hopper or newer")
-def test_memcpy_1d_tma(XBLOCK, xnumel):
-    input = torch.randn(xnumel, device="cuda")
-    output = torch.empty_like(input)
-    memcpy_1d_tma(input, output, XBLOCK)
-    torch.testing.assert_close(input, output, atol=0, rtol=0)
 
 
 # %%
@@ -284,18 +188,6 @@ def elementwise_add_tma(a, b, c, XBLOCK=32, YBLOCK=64, num_buffers=2):
     elementwise_add_tma_kernel[grid](a_desc, b_desc, c_desc, xnumel, ynumel, XBLOCK, YBLOCK, num_buffers)
 
 
-@pytest.mark.parametrize("xnumel, ynumel", [(1000, 2000), (4000, 120)])
-@pytest.mark.parametrize("XBLOCK, YBLOCK", [(32, 64)])
-@pytest.mark.parametrize("num_buffers", [1, 2, 3])
-@pytest.mark.skipif(not is_hopper_or_newer(), reason="Requires Hopper or newer")
-def test_elementwise_add_pipelined(xnumel, ynumel, XBLOCK, YBLOCK, num_buffers):
-    a = torch.randn(xnumel, ynumel, device="cuda")
-    b = torch.randn(xnumel, ynumel, device="cuda")
-    c = torch.empty_like(a, device="cuda")
-    elementwise_add_tma(a, b, c, XBLOCK, YBLOCK, num_buffers)
-    torch.testing.assert_close(a + b, c, atol=0, rtol=0)
-
-
 # %%
 # Let's compare the pipelined TMA kernel against the pipelined async copy kernel
 # from the previous tutorial.
@@ -341,21 +233,3 @@ if __name__ == "__main__":
     num_buffers = 3
     ms = triton.testing.do_bench(lambda: elementwise_add_tma(A, B, C, XBLOCK, YBLOCK, num_buffers))
     print(f"elementwise_add_tma (64x128x3): {t3.get_throughput(ms, C):.2f} TB/s")
-
-# %%
-# ```
-# elementwise_add_tma (64x128x3): 5.90 TB/s
-# ```
-#
-# We get another modest speedup by increasing the block size and pipeline depth.
-#
-# Main takeaways:
-#
-# - TMAs use a separate, often faster, hardware path for transferring between
-#   shared and global memory.
-# - TMA instructions are asynchronous; we use mbarriers to track completion of
-#   reads and commit groups to track completion of stores.
-# - TMAs reduce register pressure but restrict addressing flexibility. Depending
-#   on the layout of global tensors, it may not be possible to use TMAs.
-# - TMA instructions can be pipelined, but require explicit synchronization
-#   between the async proxy and generic proxy.

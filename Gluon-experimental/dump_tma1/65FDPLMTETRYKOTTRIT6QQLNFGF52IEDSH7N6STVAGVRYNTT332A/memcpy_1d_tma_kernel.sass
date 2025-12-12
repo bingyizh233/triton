@@ -1,0 +1,53 @@
+Function:memcpy_1d_tma_kernel
+--:-:1:-:1	LDC R1, c[0x0][0x37c];
+--:-:2:-:7	S2R R0, SR_TID.X;
+--:-:3:-:1	S2UR UR8, SR_CgaCtaId;
+--:-:-:-:1	UMOV UR4, 0x400;
+--:-:-:-:1	UMOV UR5, 0x1;
+--:-:4:-:5	LDCU.64 UR6, c[0x0][0x348];
+--:-:5:-:1	S2UR UR10, SR_CTAID.X;
+08:-:-:Y:4	ULEA UR8, UR8, UR4, 0x18;
+--:-:-:-:1	UIADD3 UR9, UPT, UPT, UR8, 0x100, URZ;
+04:-:-:-:1	LOP3.LUT P0, RZ, R0, 0x1f, RZ, 0xc0, !PT;
+32:-:-:Y:c	USHF.L.U32 UR10, UR10, 0x6, URZ;
+--:-:-:-:1	VOTEU.ALL UP0, P0;
+--:-:-:Y:4	@!P0 IMAD.MOV.U32 R0, RZ, RZ, 0x100;
+--:-:-:Y:4	@!UP0 UIADD3 UR4, UPT, UPT, -UR5, 0x100000, URZ;
+--:-:-:-:2	@!UP0 USHF.L.U32 UR5, UR4, 0xb, URZ;
+--:-:-:-:1	@!UP0 USHF.L.U32 UR4, UR4, 0x1, URZ;
+--:-:-:Y:b	VOTEU.ALL UP0, P0;
+--:2:3:-:2	@!UP0 SYNCS.EXCH.64 URZ, [UR8+0x100], UR4;
+08:-:-:-:6	BAR.SYNC.DEFER_BLOCKING 0x0;
+--:2:-:-:2	@!P0 SYNCS.ARRIVE.TRANS64 RZ, [UR8+0x100], R0;
+--:-:-:-:6	BAR.SYNC.DEFER_BLOCKING 0x0;
+16:2:-:-:2	UTMALDG.1D [UR8], [UR6];
+--:-:-:-:6	BAR.SYNC.DEFER_BLOCKING 0x0;
+--:-:3:-:2	SYNCS.PHASECHK.TRANS64.TRYWAIT P1, [UR8+0x100], RZ;
+14:-:-:-:5	@!P1 BRA LBB0;
+LBB1:
+--:-:-:-:1	BAR.SYNC.DEFER_BLOCKING 0x0;
+--:-:-:Y:4	UIADD3 UR4, UP0, UPT, UR6, 0xc0, URZ;
+--:-:-:-:1	UIADD3.X UR5, UPT, UPT, URZ, UR7, URZ, UP0, !UPT;
+--:-:-:-:1	UMOV UR9, UR10;
+--:-:1:-:7	@!P0 SYNCS.CCTL.IV [UR8+0x100];
+02:1:-:-:1	UTMASTG.1D [UR8], [UR4];
+--:-:-:-:1	ELECT P0, URZ, PT;
+--:0:-:-:1	UTMACMDFLUSH;
+--:-:-:Y:4	DEPBAR.LE SB0, 0x0;
+--:-:-:-:6	BAR.SYNC.DEFER_BLOCKING 0x0;
+02:-:-:-:5	EXIT;
+LBB0:
+--:-:1:-:2	SYNCS.PHASECHK.TRANS64.TRYWAIT P1, [UR8+0x100], RZ;
+02:-:-:-:5	@!P1 BRA LBB0;
+--:-:-:-:5	BRA LBB1;
+LBB2:
+--:-:-:Y:0	BRA LBB2;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+--:-:-:Y:0	NOP;
+
