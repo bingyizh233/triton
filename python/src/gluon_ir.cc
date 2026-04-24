@@ -21,6 +21,7 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
+#include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"
 #include "triton/Tools/GenericSwizzling.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
@@ -32,12 +33,11 @@ namespace py = pybind11;
 namespace tt = triton;
 namespace ttg = triton::gpu;
 namespace ttng = triton::nvidia_gpu;
+namespace ttn = triton::nvgpu;
 namespace gluon = mlir::triton::gluon;
 namespace ttag = mlir::triton::amdgpu;
 
-namespace {
-
-ttg::CGAEncodingAttr
+static ttg::CGAEncodingAttr
 buildCgaLayoutAttr(MLIRContext *ctx,
                    const std::vector<std::vector<int32_t>> &layout,
                    unsigned rank) {
@@ -49,7 +49,7 @@ buildCgaLayoutAttr(MLIRContext *ctx,
   return ttg::CGAEncodingAttr::get(ctx, std::move(ll));
 }
 
-std::vector<std::vector<int32_t>>
+static std::vector<std::vector<int32_t>>
 getCgaLayoutBases(ttg::CGAEncodingAttr layout) {
   std::vector<std::vector<int32_t>> result;
   auto ctx = layout.getContext();
@@ -62,14 +62,15 @@ getCgaLayoutBases(ttg::CGAEncodingAttr layout) {
 
 // Helper to check if an MLIR type or attribute has a verifier method.
 template <typename AttrOrType>
-constexpr auto hasVerifier(AttrOrType t) -> decltype(t.verifyInvariants, true) {
+static constexpr auto hasVerifier(AttrOrType t)
+    -> decltype(t.verifyInvariants, true) {
   return true;
 }
-constexpr auto hasVerifier(...) { return false; }
+static constexpr auto hasVerifier(...) { return false; }
 
 // Print a diagnostic without its location. The frontend will attach the AST
 // location to the error message.
-void printDiagStr(llvm::raw_ostream &os, const Diagnostic &diag) {
+static void printDiagStr(llvm::raw_ostream &os, const Diagnostic &diag) {
   for (const DiagnosticArgument &arg : diag.getArguments())
     arg.print(os);
   os << "\n";
@@ -180,7 +181,7 @@ struct GluonLayouts {
   }
 };
 
-bool isConvertLayoutTrivial(RankedTensorType dstTy, Value value) {
+static bool isConvertLayoutTrivial(RankedTensorType dstTy, Value value) {
   auto srcTy = cast<RankedTensorType>(value.getType());
   if (srcTy.getEncoding() == dstTy.getEncoding())
     return true;
@@ -310,12 +311,10 @@ py::object layoutToGluon(Attribute layout) {
   throw py::value_error("Unhandled encoding encountered");
 }
 
-template <typename CondT> void check(CondT &&cond, const char *msg) {
+template <typename CondT> static void check(CondT &&cond, const char *msg) {
   if (!std::forward<CondT>(cond))
     throw py::value_error(msg);
 }
-
-} // namespace
 
 void init_gluon_ir(py::module &&m) {
   using ret = py::return_value_policy;
@@ -910,6 +909,11 @@ void init_gluon_ir(py::module &&m) {
           [](GluonOpBuilder &self,
              bool relaxed) { self.create<ttng::ClusterBarrierOp>(relaxed); },
           py::arg("relaxed") = false)
+      .def("create_cluster_cta_id",
+           [](GluonOpBuilder &self) -> Value {
+             auto i32Ty = self.getBuilder().getI32Type();
+             return self.create<ttn::ClusterCTAIdOp>(i32Ty);
+           })
       // CLC (Cluster Launch Control) ops - SM100+
       .def("create_clc_try_cancel",
            [](GluonOpBuilder &self, Value result, Value mbarrier) {
