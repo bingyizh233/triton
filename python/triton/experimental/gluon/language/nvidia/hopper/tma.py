@@ -352,6 +352,7 @@ def async_load_im2col_conv2d(
     logical_offsets,
     barrier,
     result,
+    cta_m_offset=None,
     pred=True,
     multicast=False,
     _semantic=None,
@@ -373,7 +374,9 @@ def async_load_im2col_conv2d(
     logical_m = ttgl.to_tensor(logical_offsets[0], _semantic=_semantic)
     logical_k = ttgl.to_tensor(logical_offsets[1], _semantic=_semantic)
     if _unwrap_if_constexpr(_semantic.num_ctas()) > 1:
-        logical_m = logical_m.__add__(cta_split_offset(result.shape[0], _semantic=_semantic), _semantic=_semantic)
+        if cta_m_offset is None:
+            cta_m_offset = cta_split_offset(result.shape[0], _semantic=_semantic)
+        logical_m = logical_m.__add__(ttgl.to_tensor(cta_m_offset, _semantic=_semantic), _semantic=_semantic)
 
     p = ttgl.to_tensor(conv_problem.p, _semantic=_semantic)
     q = ttgl.to_tensor(conv_problem.q, _semantic=_semantic)

@@ -370,14 +370,6 @@ def _v4_load(p):
     CTA_M: gl.constexpr = a_desc.block_shape[0]
     CTA_N: gl.constexpr = b_desc.block_shape[1]
     BLOCK_K: gl.constexpr = a_desc.block_shape[1]
-    local_cga_layout: gl.constexpr = get_broadcast_cga_layout(p.c_desc.layout.cga_layout)
-    a_tma_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
-        [CTA_M, BLOCK_K], a_desc.dtype, cga_layout=local_cga_layout,
-    )
-    b_tma_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
-        [BLOCK_K, CTA_N], b_desc.dtype, cga_layout=local_cga_layout,
-    )
-
     config = p.config
     num_k_iter = config.get_num_k_iterations()
     STAGES: gl.constexpr = p.load_empty_bars.shape[0]
@@ -386,14 +378,13 @@ def _v4_load(p):
     i = 0
     while scheduler.has_work:
         prog = V4Program(config, scheduler.pid_m, scheduler.pid_n)
-        batch_id, out_y, out_x = prog.get_cluster_m_offsets()
-        _, off_n = prog.get_cluster_offsets()
+        off_m, off_n = prog.get_cluster_offsets()
         for k_iter in range(num_k_iter):
             a_stage = p.a_bufs.index(state.index)
             b_stage = p.b_bufs.index(state.index)
             mbarrier.wait(p.load_empty_bars.index(state.index), state.phase, deps=[a_stage, b_stage])
-            a_stage_local = a_stage.local_cta_view(a_desc.dtype, [CTA_M, BLOCK_K], a_tma_layout)
-            b_stage_local = b_stage.local_cta_view(b_desc.dtype, [BLOCK_K, CTA_N], b_tma_layout)
+            a_stage_local = a_stage.local_cta_view([CTA_M, BLOCK_K])
+            b_stage_local = b_stage.local_cta_view([BLOCK_K, CTA_N])
 
             iter_ci = k_iter // (config.R * config.S)
             remain_rs = k_iter % (config.R * config.S)
@@ -402,23 +393,29 @@ def _v4_load(p):
 
             bar = p.load_ready_bars.index(state.index)
             mbarrier.expect(bar, a_desc.nbytes_per_cta + b_desc.nbytes_per_cta)
-            tma.async_copy_global_to_shared_im2col_m_split(
+            k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
+            tma.async_copy_global_to_shared_im2col_conv2d(
                 a_desc,
-                [
-                    batch_id,
-                    out_y,
-                    out_x,
-                    iter_ci * BLOCK_K,
-                ],
-                [iter_r.to(tl.int16), iter_s.to(tl.int16)],
-                [config.out_h, config.out_w],
-                [config.stride_h, config.stride_w],
-                [config.pad_h, config.pad_w],
+                tma.Conv2DProblem(
+                    n=0,
+                    h=0,
+                    w=0,
+                    c=config.Ci,
+                    k=0,
+                    r=config.R,
+                    s=config.S,
+                    p=config.out_h,
+                    q=config.out_w,
+                    stride_h=config.stride_h,
+                    stride_w=config.stride_w,
+                    pad_h=config.pad_h,
+                    pad_w=config.pad_w,
+                ),
+                [off_m, k_offset],
                 bar,
                 a_stage_local,
                 p.cta_m_offset,
             )
-            k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
             tma.async_copy_global_to_shared_cta_split(
                 b_desc, [k_offset, off_n], 1, bar, b_stage_local, p.cta_n_offset,
             )
