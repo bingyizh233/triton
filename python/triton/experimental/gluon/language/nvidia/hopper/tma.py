@@ -19,11 +19,13 @@ __all__ = [
     "async_copy_global_to_shared",
     "async_copy_global_to_shared_cta_split",
     "async_copy_global_to_shared_im2col",
+    "async_copy_global_to_shared_im2col_conv2d",
     "async_copy_global_to_shared_im2col_m_split",
     "async_copy_shared_to_global",
     "async_load",
     "async_load_cta_split",
     "async_load_im2col",
+    "async_load_im2col_conv2d",
     "async_load_im2col_m_split",
     "cta_split_offset",
     "async_store",
@@ -33,7 +35,32 @@ __all__ = [
     "tensor_descriptor_type",
     "tensor_descriptor_im2col_type",
     "make_tensor_descriptor",
+    "Conv2DProblem",
 ]
+
+
+@dataclass(frozen=True)
+class Conv2DProblem:
+    n: int
+    h: int
+    w: int
+    c: int
+    k: int
+    r: int
+    s: int
+    p: int
+    q: int
+    stride_h: int = 1
+    stride_w: int = 1
+    pad_h: int = 0
+    pad_w: int = 0
+    dilation_h: int = 1
+    dilation_w: int = 1
+    input_layout: str = "NHWC"
+
+    def __post_init__(self):
+        if self.input_layout != "NHWC":
+            raise ValueError(f"Conv2DProblem only supports NHWC input layout, got {self.input_layout}")
 
 
 @dataclass(eq=True)
@@ -319,6 +346,65 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
 
 
 @builtin
+def async_load_im2col_conv2d(
+    tensor_desc,
+    conv_problem,
+    logical_offsets,
+    barrier,
+    result,
+    pred=True,
+    multicast=False,
+    _semantic=None,
+):
+    """
+    Load a Conv2D activation tile through im2col using cluster-level GEMM coordinates.
+
+    ``logical_offsets`` is ``[m_offset, k_offset]`` where ``m`` indexes
+    ``N * P * Q`` and ``k`` indexes ``R * S * C``. This wrapper makes the
+    convolution metadata visible at the Gluon API layer while preserving the
+    existing 1CTA im2col lowering path.
+    """
+    conv_problem = _unwrap_if_constexpr(conv_problem)
+    if not isinstance(conv_problem, Conv2DProblem):
+        raise ValueError(f"expected Conv2DProblem, got {type(conv_problem)}")
+    if len(logical_offsets) != 2:
+        raise ValueError(f"async_load_im2col_conv2d expects [m_offset, k_offset], got {len(logical_offsets)} values")
+
+    logical_m = ttgl.to_tensor(logical_offsets[0], _semantic=_semantic)
+    logical_k = ttgl.to_tensor(logical_offsets[1], _semantic=_semantic)
+
+    p = ttgl.to_tensor(conv_problem.p, _semantic=_semantic)
+    q = ttgl.to_tensor(conv_problem.q, _semantic=_semantic)
+    c = ttgl.to_tensor(conv_problem.c, _semantic=_semantic)
+    s = ttgl.to_tensor(conv_problem.s, _semantic=_semantic)
+    stride_h = ttgl.to_tensor(conv_problem.stride_h, _semantic=_semantic)
+    stride_w = ttgl.to_tensor(conv_problem.stride_w, _semantic=_semantic)
+    pad_h = ttgl.to_tensor(conv_problem.pad_h, _semantic=_semantic)
+    pad_w = ttgl.to_tensor(conv_problem.pad_w, _semantic=_semantic)
+    dilation_h = ttgl.to_tensor(conv_problem.dilation_h, _semantic=_semantic)
+    dilation_w = ttgl.to_tensor(conv_problem.dilation_w, _semantic=_semantic)
+
+    pq = p.__mul__(q, _semantic=_semantic)
+    batch = logical_m.__floordiv__(pq, _semantic=_semantic)
+    rem_m = logical_m.__mod__(pq, _semantic=_semantic)
+    out_y = rem_m.__floordiv__(q, _semantic=_semantic)
+    out_x = rem_m.__mod__(q, _semantic=_semantic)
+
+    channel = logical_k.__mod__(c, _semantic=_semantic)
+    rs = logical_k.__floordiv__(c, _semantic=_semantic)
+    filter_r = rs.__floordiv__(s, _semantic=_semantic)
+    filter_s = rs.__mod__(s, _semantic=_semantic)
+
+    in_y = out_y.__mul__(stride_h, _semantic=_semantic).__sub__(pad_h, _semantic=_semantic)
+    in_x = out_x.__mul__(stride_w, _semantic=_semantic).__sub__(pad_w, _semantic=_semantic)
+    offset_r = filter_r.__mul__(dilation_h, _semantic=_semantic).to(ttgl.int16, _semantic=_semantic)
+    offset_s = filter_s.__mul__(dilation_w, _semantic=_semantic).to(ttgl.int16, _semantic=_semantic)
+
+    async_load_im2col(tensor_desc, [batch, in_y, in_x, channel], [offset_r, offset_s], barrier, result, pred,
+                      multicast, _semantic=_semantic)
+
+
+@builtin
 def async_load_im2col_m_split(
     tensor_desc,
     coord,
@@ -410,6 +496,7 @@ def async_store(tensor_desc, coord, src, _semantic=None):
 async_copy_global_to_shared = async_load
 async_copy_global_to_shared_cta_split = async_load_cta_split
 async_copy_global_to_shared_im2col = async_load_im2col
+async_copy_global_to_shared_im2col_conv2d = async_load_im2col_conv2d
 async_copy_global_to_shared_im2col_m_split = async_load_im2col_m_split
 async_copy_shared_to_global = async_store
 

@@ -9,10 +9,12 @@ from triton.experimental.gluon.language.nvidia.hopper.tma import (
     async_atomic_xor,
     async_copy_global_to_shared_cta_split,
     async_copy_global_to_shared,
+    async_copy_global_to_shared_im2col_conv2d,
     async_copy_shared_to_global,
     async_load,
     async_load_cta_split,
     async_load_im2col,
+    async_load_im2col_conv2d,
     async_load_im2col_m_split,
     cta_split_offset,
     async_store,
@@ -21,6 +23,7 @@ from triton.experimental.gluon.language.nvidia.hopper.tma import (
     tensor_descriptor_type,
     make_tensor_descriptor,
     _emit_alignment_check,
+    Conv2DProblem,
 )
 
 __all__ = [
@@ -34,10 +37,12 @@ __all__ = [
     "async_atomic_xor",
     "async_copy_global_to_shared_cta_split",
     "async_copy_global_to_shared",
+    "async_copy_global_to_shared_im2col_conv2d",
     "async_copy_shared_to_global",
     "async_load",
     "async_load_cta_split",
     "async_load_im2col",
+    "async_load_im2col_conv2d",
     "async_load_im2col_m_split",
     "cta_split_offset",
     "async_store",
@@ -45,6 +50,7 @@ __all__ = [
     "tensor_descriptor",
     "tensor_descriptor_type",
     "make_tensor_descriptor",
+    "Conv2DProblem",
 ]
 
 
