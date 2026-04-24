@@ -12,7 +12,7 @@ two_ctas=True``, and the epilogue TMA-stores each tile in N-subtiles.
 Compiler gotcha (2026-04-23): calling ``cluster.cluster_cta_id()`` directly
 from this user kernel breaks Gluon's tile-level programming model and has
 caused warp-specialization miscompiles. CTA-local offsets are hidden behind
-the TMA frontend helpers.
+the TMA frontend helpers and materialized in the kernel entry.
 
 Cluster contract:
     CGA_LAYOUT = ((1, 0),)                       # 2-CTA M-split
@@ -322,6 +322,8 @@ class ClcTileSchedulerConsumer:
 @aggregate
 class V4Args:
     config: V4Config
+    cta_m_offset: gl.tensor
+    cta_n_offset: gl.tensor
     a_desc: tma.tensor_descriptor_im2col
     b_desc: tma.tensor_descriptor
     c_desc: tma.tensor_descriptor
@@ -414,9 +416,12 @@ def _v4_load(p):
                 [config.pad_h, config.pad_w],
                 bar,
                 a_stage_local,
+                p.cta_m_offset,
             )
             k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
-            tma.async_copy_global_to_shared_cta_split(b_desc, [k_offset, off_n], 1, bar, b_stage_local)
+            tma.async_copy_global_to_shared_cta_split(
+                b_desc, [k_offset, off_n], 1, bar, b_stage_local, p.cta_n_offset,
+            )
             state = state.next()
         scheduler = scheduler.step(i)
         i += 1
@@ -582,6 +587,8 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
         gl.to_tensor(Ci), M_GEMM,
         TILE_M, TILE_N, CTA_M, CTA_N, BLOCK_K, GROUP_SIZE_M,
     )
+    cta_m_offset = tma.cta_split_offset(CTA_M)
+    cta_n_offset = tma.cta_split_offset(CTA_N)
     # Cluster-aware SMEM layouts: A is M-split across CTAs, B is N-split.
     a_smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
         [TILE_M, BLOCK_K], a_desc.dtype, cga_layout=a_cga_layout,
@@ -636,6 +643,7 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
 
     p = V4Args(
         config,
+        cta_m_offset, cta_n_offset,
         a_desc, b_desc, c_desc,
         a_bufs, b_bufs,
         acc_bufs,

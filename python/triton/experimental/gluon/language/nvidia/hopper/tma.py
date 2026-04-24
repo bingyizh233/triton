@@ -25,6 +25,7 @@ __all__ = [
     "async_load_cta_split",
     "async_load_im2col",
     "async_load_im2col_m_split",
+    "cta_split_offset",
     "async_store",
     "store_wait",
     "tensor_descriptor",
@@ -203,9 +204,17 @@ def _convert_im2col_offsets(offsets, _semantic):
     return offsets_ir
 
 
-def _local_cta_offset(result, dim: int, _semantic):
+@builtin
+def cta_split_offset(extent, _semantic=None):
+    """
+    Return this CTA's logical offset for a one-dimensional CTA split.
+
+    This is intended to be materialized in the kernel entry and passed into
+    warp-specialized partitions, avoiding direct CTA-id queries inside
+    extracted partition functions.
+    """
     cid = ttgl.tensor(_semantic.builder.create_cluster_cta_id(), ttgl.int32)
-    per_cta = ttgl.to_tensor(result.shape[dim], _semantic=_semantic)
+    per_cta = ttgl.to_tensor(extent, _semantic=_semantic)
     return cid.__mul__(per_cta, _semantic=_semantic)
 
 
@@ -243,7 +252,17 @@ def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, 
 
 
 @builtin
-def async_load_cta_split(tensor_desc, coord, split_dim, barrier, result, pred=True, multicast=False, _semantic=None):
+def async_load_cta_split(
+    tensor_desc,
+    coord,
+    split_dim,
+    barrier,
+    result,
+    cta_offset=None,
+    pred=True,
+    multicast=False,
+    _semantic=None,
+):
     """
     Load a TMA tile with one logical coordinate dimension split across CTAs.
 
@@ -255,7 +274,9 @@ def async_load_cta_split(tensor_desc, coord, split_dim, barrier, result, pred=Tr
         raise ValueError(f"async_load_cta_split split_dim={split_dim} out of range for {len(coord)}D coord")
     coord = list(coord)
     base = ttgl.to_tensor(coord[split_dim], _semantic=_semantic)
-    coord[split_dim] = base.__add__(_local_cta_offset(result, split_dim, _semantic), _semantic=_semantic)
+    if cta_offset is None:
+        cta_offset = cta_split_offset(result.shape[split_dim], _semantic=_semantic)
+    coord[split_dim] = base.__add__(ttgl.to_tensor(cta_offset, _semantic=_semantic), _semantic=_semantic)
     async_load(tensor_desc, coord, barrier, result, pred, multicast, _semantic=_semantic)
 
 
@@ -307,6 +328,7 @@ def async_load_im2col_m_split(
     padding,
     barrier,
     result,
+    cta_m_offset=None,
     pred=True,
     multicast=False,
     _semantic=None,
@@ -323,6 +345,7 @@ def async_load_im2col_m_split(
         padding: Convolution padding [pad_h, pad_w].
         barrier: Barrier for synchronization.
         result: Destination CTA-local shared-memory descriptor.
+        cta_m_offset: Optional precomputed logical-M offset for this CTA.
         pred: Predicate for conditional execution.
         multicast: Enable multicast.
     """
@@ -352,7 +375,9 @@ def async_load_im2col_m_split(
     linear_m = batch.__mul__(out_hw, _semantic=_semantic)
     linear_m = linear_m.__add__(out_y.__mul__(out_w, _semantic=_semantic), _semantic=_semantic)
     linear_m = linear_m.__add__(out_x, _semantic=_semantic)
-    linear_m = linear_m.__add__(_local_cta_offset(result, 0, _semantic), _semantic=_semantic)
+    if cta_m_offset is None:
+        cta_m_offset = cta_split_offset(result.shape[0], _semantic=_semantic)
+    linear_m = linear_m.__add__(ttgl.to_tensor(cta_m_offset, _semantic=_semantic), _semantic=_semantic)
 
     batch = linear_m.__floordiv__(out_hw, _semantic=_semantic)
     rem = linear_m.__mod__(out_hw, _semantic=_semantic)

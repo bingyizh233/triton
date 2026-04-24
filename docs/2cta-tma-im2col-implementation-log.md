@@ -24,3 +24,12 @@ Started: 2026-04-24T11:47:59-07:00
 - Updated the 2-CTA convolution prototype so user kernel code no longer calls `cluster.cluster_cta_id()` or stores `cid` in `V4Args`; A's M split and B's N split are now hidden behind TMA helpers.
 - Verification: `py_compile` passed for the modified TMA frontends and convolution prototype, and both Hopper/Blackwell TMA modules expose the new helpers.
 - B200 correctness smoke test was submitted as Slurm job `1958890` but remained pending on resources and was cancelled before allocation.
+
+## Step 3: Materialize CTA split offsets outside warp-specialized partitions
+
+- Added `tma.cta_split_offset(extent)` to produce a logical CTA offset without exposing raw `cluster_cta_id`.
+- Updated the TMA split helpers to accept an optional precomputed CTA offset.
+- Updated the 2-CTA convolution prototype to compute `cta_m_offset` and `cta_n_offset` in the kernel entry and pass those offsets through `V4Args`.
+- This preserves the no-raw-CTA-id user model while avoiding `cluster_cta_id` creation inside the warp-specialized load partition.
+- Verification: `py_compile`, import checks, and `git diff --check` passed.
+- B200 correctness smoke test was submitted as Slurm job `1958968` but remained pending on resources and was cancelled before allocation.
