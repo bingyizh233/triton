@@ -9,12 +9,10 @@ per-CTA TMA loads stream through a shared-memory ring (STAGES buffers),
 accumulation lives in a one-deep TMEM ring with ``cga_layout=((1,0),),
 two_ctas=True``, and the epilogue TMA-stores each tile in N-subtiles.
 
-Compiler gotcha (2026-04-23): calling ``cluster.cluster_cta_id()`` *inside*
-a warp-specialized partition body causes that partition to be extracted
-into a separate ``.func`` by the gluon lowering pass, which produces a
-silent miscompile that deadlocks on ``mbarrier.try_wait`` of
-``load_ready_bars``. Always read ``cluster_cta_id()`` in the kernel entry
-and pass it through the partition args (``V4Args.cid``).
+Compiler gotcha (2026-04-23): calling ``cluster.cluster_cta_id()`` directly
+from this user kernel breaks Gluon's tile-level programming model and has
+caused warp-specialization miscompiles. CTA-local offsets are hidden behind
+the TMA frontend helpers.
 
 Cluster contract:
     CGA_LAYOUT = ((1, 0),)                       # 2-CTA M-split
@@ -51,7 +49,7 @@ from triton.language.core import _aggregate as aggregate
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor, TensorDescriptorIm2Col
-from triton.experimental.gluon.language.nvidia.hopper import cluster, mbarrier, tma
+from triton.experimental.gluon.language.nvidia.hopper import mbarrier, tma
 from triton.experimental.gluon.language.nvidia.blackwell import (
     TensorMemoryLayout,
     allocate_tensor_memory,
@@ -252,16 +250,11 @@ class V4Program:
         return self.pid_m * self.config.TILE_M, self.pid_n * self.config.TILE_N
 
     @gluon.jit
-    def get_cta_offsets(self, cid):
-        off_m, off_n = self.get_cluster_offsets()
-        return off_m + cid * self.config.CTA_M, off_n + cid * self.config.CTA_N
-
-    @gluon.jit
-    def get_m_offsets(self, cid):
-        cta_off_m, _ = self.get_cta_offsets(cid)
-        out_x = cta_off_m % self.config.out_w
-        out_y = (cta_off_m // self.config.out_w) % self.config.out_h
-        batch_id = (cta_off_m // self.config.out_w) // self.config.out_h
+    def get_cluster_m_offsets(self):
+        off_m, _ = self.get_cluster_offsets()
+        out_x = off_m % self.config.out_w
+        out_y = (off_m // self.config.out_w) % self.config.out_h
+        batch_id = (off_m // self.config.out_w) // self.config.out_h
         return batch_id, out_y, out_x
 
 
@@ -329,7 +322,6 @@ class ClcTileSchedulerConsumer:
 @aggregate
 class V4Args:
     config: V4Config
-    cid: gl.tensor
     a_desc: tma.tensor_descriptor_im2col
     b_desc: tma.tensor_descriptor
     c_desc: tma.tensor_descriptor
@@ -385,7 +377,6 @@ def _v4_load(p):
     )
 
     config = p.config
-    cid = p.cid
     num_k_iter = config.get_num_k_iterations()
     STAGES: gl.constexpr = p.load_empty_bars.shape[0]
     state = Counter.create(1, STAGES)
@@ -393,8 +384,8 @@ def _v4_load(p):
     i = 0
     while scheduler.has_work:
         prog = V4Program(config, scheduler.pid_m, scheduler.pid_n)
-        batch_id, out_y, out_x = prog.get_m_offsets(cid)
-        _, cta_off_n = prog.get_cta_offsets(cid)
+        batch_id, out_y, out_x = prog.get_cluster_m_offsets()
+        _, off_n = prog.get_cluster_offsets()
         for k_iter in range(num_k_iter):
             a_stage = p.a_bufs.index(state.index)
             b_stage = p.b_bufs.index(state.index)
@@ -409,20 +400,23 @@ def _v4_load(p):
 
             bar = p.load_ready_bars.index(state.index)
             mbarrier.expect(bar, a_desc.nbytes_per_cta + b_desc.nbytes_per_cta)
-            tma.async_copy_global_to_shared_im2col(
+            tma.async_copy_global_to_shared_im2col_m_split(
                 a_desc,
                 [
                     batch_id,
-                    out_y * config.stride_h - config.pad_h,
-                    out_x * config.stride_w - config.pad_w,
+                    out_y,
+                    out_x,
                     iter_ci * BLOCK_K,
                 ],
                 [iter_r.to(tl.int16), iter_s.to(tl.int16)],
+                [config.out_h, config.out_w],
+                [config.stride_h, config.stride_w],
+                [config.pad_h, config.pad_w],
                 bar,
                 a_stage_local,
             )
             k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
-            tma.async_copy_global_to_shared(b_desc, [k_offset, cta_off_n], bar, b_stage_local)
+            tma.async_copy_global_to_shared_cta_split(b_desc, [k_offset, off_n], 1, bar, b_stage_local)
             state = state.next()
         scheduler = scheduler.step(i)
         i += 1
@@ -588,8 +582,6 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
         gl.to_tensor(Ci), M_GEMM,
         TILE_M, TILE_N, CTA_M, CTA_N, BLOCK_K, GROUP_SIZE_M,
     )
-    cid = cluster.cluster_cta_id()
-
     # Cluster-aware SMEM layouts: A is M-split across CTAs, B is N-split.
     a_smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
         [TILE_M, BLOCK_K], a_desc.dtype, cga_layout=a_cga_layout,
@@ -643,7 +635,7 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
     acc_bufs = allocate_tensor_memory(gl.float32, [ACC_STAGES, TILE_M, TILE_N], acc_layout)
 
     p = V4Args(
-        config, cid,
+        config,
         a_desc, b_desc, c_desc,
         a_bufs, b_bufs,
         acc_bufs,

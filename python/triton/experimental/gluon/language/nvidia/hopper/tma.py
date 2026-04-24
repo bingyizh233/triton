@@ -17,10 +17,14 @@ __all__ = [
     "async_atomic_or",
     "async_atomic_xor",
     "async_copy_global_to_shared",
+    "async_copy_global_to_shared_cta_split",
     "async_copy_global_to_shared_im2col",
+    "async_copy_global_to_shared_im2col_m_split",
     "async_copy_shared_to_global",
     "async_load",
+    "async_load_cta_split",
     "async_load_im2col",
+    "async_load_im2col_m_split",
     "async_store",
     "store_wait",
     "tensor_descriptor",
@@ -199,6 +203,12 @@ def _convert_im2col_offsets(offsets, _semantic):
     return offsets_ir
 
 
+def _local_cta_offset(result, dim: int, _semantic):
+    cid = ttgl.tensor(_semantic.builder.create_cluster_cta_id(), ttgl.int32)
+    per_cta = ttgl.to_tensor(result.shape[dim], _semantic=_semantic)
+    return cid.__mul__(per_cta, _semantic=_semantic)
+
+
 @builtin
 def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, _semantic=None):
     """
@@ -230,6 +240,23 @@ def async_load(tensor_desc, coord, barrier, result, pred=True, multicast=False, 
         multicast,
         None,
     )
+
+
+@builtin
+def async_load_cta_split(tensor_desc, coord, split_dim, barrier, result, pred=True, multicast=False, _semantic=None):
+    """
+    Load a TMA tile with one logical coordinate dimension split across CTAs.
+
+    The caller supplies cluster-level coordinates. The local CTA offset for
+    ``split_dim`` is derived from the CTA-local destination view.
+    """
+    split_dim = _unwrap_if_constexpr(split_dim)
+    if split_dim < 0 or split_dim >= len(coord):
+        raise ValueError(f"async_load_cta_split split_dim={split_dim} out of range for {len(coord)}D coord")
+    coord = list(coord)
+    base = ttgl.to_tensor(coord[split_dim], _semantic=_semantic)
+    coord[split_dim] = base.__add__(_local_cta_offset(result, split_dim, _semantic), _semantic=_semantic)
+    async_load(tensor_desc, coord, barrier, result, pred, multicast, _semantic=_semantic)
 
 
 @builtin
@@ -271,6 +298,74 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
 
 
 @builtin
+def async_load_im2col_m_split(
+    tensor_desc,
+    coord,
+    offsets,
+    out_shape,
+    element_strides,
+    padding,
+    barrier,
+    result,
+    pred=True,
+    multicast=False,
+    _semantic=None,
+):
+    """
+    Load an im2col tile whose logical M dimension is split across CTAs.
+
+    Args:
+        tensor_desc: Tensor descriptor (im2col) for an NHWC input tensor.
+        coord: Cluster-level logical coordinates [batch, out_y, out_x, channel].
+        offsets: Im2col filter offsets.
+        out_shape: Output spatial shape [out_h, out_w].
+        element_strides: Convolution stride [stride_h, stride_w].
+        padding: Convolution padding [pad_h, pad_w].
+        barrier: Barrier for synchronization.
+        result: Destination CTA-local shared-memory descriptor.
+        pred: Predicate for conditional execution.
+        multicast: Enable multicast.
+    """
+    if len(coord) != 4:
+        raise ValueError(f"async_load_im2col_m_split expects 4D NHWC logical coord, got {len(coord)} values")
+    if len(out_shape) != 2:
+        raise ValueError(f"async_load_im2col_m_split expects out_shape=[out_h, out_w], got {len(out_shape)} values")
+    if len(element_strides) != 2:
+        raise ValueError(
+            f"async_load_im2col_m_split expects element_strides=[stride_h, stride_w], got {len(element_strides)} values"
+        )
+    if len(padding) != 2:
+        raise ValueError(f"async_load_im2col_m_split expects padding=[pad_h, pad_w], got {len(padding)} values")
+
+    batch = ttgl.to_tensor(coord[0], _semantic=_semantic)
+    out_y = ttgl.to_tensor(coord[1], _semantic=_semantic)
+    out_x = ttgl.to_tensor(coord[2], _semantic=_semantic)
+    channel = coord[3]
+    out_h = ttgl.to_tensor(out_shape[0], _semantic=_semantic)
+    out_w = ttgl.to_tensor(out_shape[1], _semantic=_semantic)
+    stride_h = ttgl.to_tensor(element_strides[0], _semantic=_semantic)
+    stride_w = ttgl.to_tensor(element_strides[1], _semantic=_semantic)
+    pad_h = ttgl.to_tensor(padding[0], _semantic=_semantic)
+    pad_w = ttgl.to_tensor(padding[1], _semantic=_semantic)
+
+    out_hw = out_h.__mul__(out_w, _semantic=_semantic)
+    linear_m = batch.__mul__(out_hw, _semantic=_semantic)
+    linear_m = linear_m.__add__(out_y.__mul__(out_w, _semantic=_semantic), _semantic=_semantic)
+    linear_m = linear_m.__add__(out_x, _semantic=_semantic)
+    linear_m = linear_m.__add__(_local_cta_offset(result, 0, _semantic), _semantic=_semantic)
+
+    batch = linear_m.__floordiv__(out_hw, _semantic=_semantic)
+    rem = linear_m.__mod__(out_hw, _semantic=_semantic)
+    out_y = rem.__floordiv__(out_w, _semantic=_semantic)
+    out_x = rem.__mod__(out_w, _semantic=_semantic)
+    in_y = out_y.__mul__(stride_h, _semantic=_semantic).__sub__(pad_h, _semantic=_semantic)
+    in_x = out_x.__mul__(stride_w, _semantic=_semantic).__sub__(pad_w, _semantic=_semantic)
+
+    async_load_im2col(tensor_desc, [batch, in_y, in_x, channel], offsets, barrier, result, pred, multicast,
+                      _semantic=_semantic)
+
+
+@builtin
 def async_store(tensor_desc, coord, src, _semantic=None):
     """
     Store data from shared memory to global memory using TMA.
@@ -288,7 +383,9 @@ def async_store(tensor_desc, coord, src, _semantic=None):
 
 # Backward-compatible aliases
 async_copy_global_to_shared = async_load
+async_copy_global_to_shared_cta_split = async_load_cta_split
 async_copy_global_to_shared_im2col = async_load_im2col
+async_copy_global_to_shared_im2col_m_split = async_load_im2col_m_split
 async_copy_shared_to_global = async_store
 
 
