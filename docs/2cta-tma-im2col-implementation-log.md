@@ -33,3 +33,8 @@ Started: 2026-04-24T11:47:59-07:00
 - This preserves the no-raw-CTA-id user model while avoiding `cluster_cta_id` creation inside the warp-specialized load partition.
 - Verification: `py_compile`, import checks, and `git diff --check` passed.
 - B200 correctness smoke test was submitted as Slurm job `1958968` but remained pending on resources and was cancelled before allocation.
+
+## Step 4: Parser regression for CTA-split TMA helpers
+
+- Added `test_nv_tma_cta_split_helper_parse` to cover `tma.cta_split_offset`, `shared_memory_descriptor.local_cta_view`, and `tma.async_load_cta_split` in a 2-CTA parse path.
+- Verification: `pytest -q python/test/gluon/test_frontend.py::test_nv_tma_cta_split_helper_parse` passed.

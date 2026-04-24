@@ -4144,6 +4144,41 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 4 : i32, ttg.targ
 """)
 
 
+def test_nv_tma_cta_split_helper_parse():
+
+    @gluon.jit
+    def kernel(input_ptr):
+        X: ttgl.constexpr = 128
+        desc_layout: ttgl.constexpr = ttgl.NVMMASharedLayout(
+            swizzle_byte_width=128, element_bitwidth=32, rank=2,
+        )
+        cluster_layout: ttgl.constexpr = ttgl.NVMMASharedLayout(
+            swizzle_byte_width=128, element_bitwidth=32, rank=2, cga_layout=[(0, 1)],
+        )
+        local_layout: ttgl.constexpr = ttgl.NVMMASharedLayout(
+            swizzle_byte_width=128, element_bitwidth=32, rank=2, cga_layout=[(0, 0)],
+        )
+        input_desc = tma.make_tensor_descriptor(
+            input_ptr,
+            shape=[X, 2 * X],
+            strides=[2 * X, 1],
+            block_shape=[X, X],
+            layout=desc_layout,
+        )
+        smem = ttgl.allocate_shared_memory(ttgl.float32, [X, 2 * X], cluster_layout)
+        smem_local = smem.local_cta_view(ttgl.float32, [X, X], local_layout)
+        bar = mbarrier.allocate_mbarrier()
+        mbarrier.init(bar, count=1)
+        mbarrier.expect(bar, X * X * ttgl.float32.primitive_bitwidth // 8)
+        cta_n_offset = tma.cta_split_offset(X)
+        tma.async_load_cta_split(input_desc, [0, 0], 1, bar, smem_local, cta_n_offset)
+
+    module = run_parser(kernel, *make_args(MockTensor(ttgl.float32), num_ctas=2), target=BLACKWELL_TARGET)
+    ir = module.str_nodebug()
+    assert "ttng.async_tma_copy_global_to_local" in ir
+    assert "ttg.memdesc_reinterpret" in ir
+
+
 @pytest.mark.parametrize("target", [BLACKWELL_TARGET, HOPPER_TARGET])
 def test_nv_tma_descriptor_store_kernel(target):
 
