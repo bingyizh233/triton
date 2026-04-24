@@ -399,8 +399,8 @@ def _v4_load(p):
             a_stage = p.a_bufs.index(state.index)
             b_stage = p.b_bufs.index(state.index)
             mbarrier.wait(p.load_empty_bars.index(state.index), state.phase, deps=[a_stage, b_stage])
-            a_stage_local = a_stage._reinterpret(a_desc.dtype, [CTA_M, BLOCK_K], a_tma_layout)
-            b_stage_local = b_stage._reinterpret(b_desc.dtype, [BLOCK_K, CTA_N], b_tma_layout)
+            a_stage_local = a_stage.local_cta_view(a_desc.dtype, [CTA_M, BLOCK_K], a_tma_layout)
+            b_stage_local = b_stage.local_cta_view(b_desc.dtype, [BLOCK_K, CTA_N], b_tma_layout)
 
             iter_ci = k_iter // (config.R * config.S)
             remain_rs = k_iter % (config.R * config.S)
