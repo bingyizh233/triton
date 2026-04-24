@@ -26,8 +26,8 @@ Cluster contract:
 
 Verified performance on B200, bf16, N=128, 64x64, 3x3, stride=1, pad=1,
 with the CLC scheduler + ``acc_stages=2`` TMEM ring:
-    Co=384, bn=128 bk=128 stages=4 acc_stages=2: ~1.32 ms, ~1193 TFLOPS
-    Co=512, bn=256 bk=64  stages=5 acc_stages=2: ~1.32 ms, ~1411 TFLOPS (peak)
+    Co=384, bm=128 bn=128 bk=128 epi=128 stages=4: 1400.8 TFLOPS
+    Co=512, bm=128 bn=256 bk=64  epi=256 stages=5: 1453.3 TFLOPS (peak)
 
 Recommended config:
     ``acc_stages=2`` is ~7-15% faster than ``acc_stages=1`` on the target
