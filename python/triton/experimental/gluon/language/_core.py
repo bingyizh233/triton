@@ -523,19 +523,19 @@ class shared_memory_descriptor(base_value):
         return _semantic.memdesc_reinterpret(self, dtype, shape, layout)
 
     @builtin
-    def local_cta_view(self, dtype, shape, layout, _semantic: GluonSemantic = None) -> shared_memory_descriptor:
+    def local_cta_view(self, shape, layout=None, _semantic: GluonSemantic = None) -> shared_memory_descriptor:
         """
         View a cluster shared-memory descriptor as the current CTA's local tile.
 
         This is the public spelling for the 2-CTA pattern where a cluster-wide
         allocation is consumed by instructions that operate on each CTA's local
-        slice. The layout must describe the local CTA view.
+        slice. The returned descriptor keeps the source allocation as its
+        provenance while exposing the requested CTA-local shape.
         """
-        dtype = _unwrap_if_constexpr(dtype)
         shape = [_unwrap_if_constexpr(s) for s in shape]
         layout = _unwrap_if_constexpr(layout)
 
-        return _semantic.memdesc_reinterpret(self, dtype, shape, layout)
+        return _semantic.memdesc_local_cta_view(self, shape, layout)
 
     @builtin
     def _keep_alive(self, _semantic: GluonSemantic = None) -> None:

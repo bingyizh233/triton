@@ -2,7 +2,7 @@ from typing import Sequence, List, TypeVar, Tuple, Callable
 import math
 from triton.language.semantic import TritonSemantic
 from . import _core as ttgl
-from ._layouts import AutoLayout, DistributedLayout, DistributedLinearLayout, SliceLayout, SharedLayout, CoalescedLayout, SharedLinearLayout
+from ._layouts import AutoLayout, DistributedLayout, DistributedLinearLayout, SliceLayout, SharedLayout, CoalescedLayout, SharedLinearLayout, NVMMASharedLayout
 from triton._C.libtriton.gluon_ir import GluonOpBuilder, compute_tmem_reg_layout
 from triton._C.libtriton import ir
 from triton.compiler.code_generator import flatten_values_to_ir, unflatten_ir_values
@@ -17,6 +17,18 @@ def _check(cond: bool, msg_fn: Callable[[], str], category=ValueError):
 
 def _is_int_list(value):
     return isinstance(value, Sequence) and all(isinstance(i, int) for i in value)
+
+
+def _cga_split_extents(cga_layout, rank):
+    extents = [1] * rank
+    for basis in cga_layout:
+        _check(len(basis) == rank, lambda: f"CGA basis rank {len(basis)} does not match memdesc rank {rank}")
+        for dim, stride in enumerate(basis):
+            _check(isinstance(stride, int), lambda: f"CGA basis entries must be ints but got {basis}")
+            _check(stride >= 0, lambda: f"CGA basis entries must be non-negative but got {basis}")
+            if stride:
+                extents[dim] = max(extents[dim], stride * 2)
+    return extents
 
 
 def _compute_tmem_reg_layout(element_ty, shape, alloc_shape, layout, num_warps, instr_variant):
@@ -479,6 +491,46 @@ class GluonSemantic(TritonSemantic[TensorTy]):
         ty = ttgl.shared_memory_descriptor_type(dtype, shape, layout, shape)
         handle = self.builder.create_memdesc_reinterpret(ty.to_ir(self.builder), mem_desc.handle)
         return ttgl.shared_memory_descriptor(handle, **ty.__dict__)
+
+    def memdesc_local_cta_view(self, mem_desc, shape, layout):
+        _check(_is_int_list(shape), lambda: f"all elements of 'shape' must be integers but got {shape}")
+        _check(len(shape) == mem_desc.rank,
+               lambda: f"local CTA view rank {len(shape)} does not match source rank {mem_desc.rank}")
+
+        source_shape = list(mem_desc.shape)
+        source_layout = mem_desc.layout
+        source_cga_layout = getattr(source_layout, "cga_layout", []) or []
+        split_extents = _cga_split_extents(source_cga_layout, mem_desc.rank)
+
+        for dim, (cluster_extent, local_extent, split_extent) in enumerate(
+                zip(source_shape, shape, split_extents)):
+            _check(cluster_extent % split_extent == 0,
+                   lambda: f"source shape {source_shape} is not divisible by CGA split {split_extents}")
+            expected_extent = cluster_extent // split_extent
+            _check(
+                local_extent == expected_extent,
+                lambda: (f"illegal CTA-local view shape {shape}: dimension {dim} should be "
+                         f"{expected_extent} for source shape {source_shape} and CGA split {split_extents}"),
+            )
+
+        if layout is None:
+            _check(
+                isinstance(source_layout, NVMMASharedLayout),
+                lambda: "local_cta_view can infer layout only for NVMMASharedLayout; pass an explicit layout",
+            )
+            broadcast_cga_layout = [[0] * len(shape) for _ in source_cga_layout] if source_cga_layout else None
+            layout = NVMMASharedLayout.get_default_for(
+                shape,
+                mem_desc.dtype,
+                transposed=source_layout.transposed,
+                fp4_padded=source_layout.fp4_padded,
+                cga_layout=broadcast_cga_layout,
+            )
+        else:
+            _check(isinstance(layout, ttgl.SharedLayout),
+                   lambda: f"expected 'layout' to be a SharedLayout but got {layout}")
+
+        return self.memdesc_reinterpret(mem_desc, mem_desc.dtype, shape, layout)
 
     def wrap_tensor(self, x, scalar_ty, ret_shape, layout):
         if ret_shape:
