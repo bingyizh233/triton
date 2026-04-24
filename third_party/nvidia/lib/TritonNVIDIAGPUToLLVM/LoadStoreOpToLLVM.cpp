@@ -1134,6 +1134,16 @@ getMsgToUnpackedOffsetLayout(const LinearLayout &packedLayout,
   return unpackLayout * packedLayout;
 }
 
+static auto getCTALocalTileOffsets(Location loc,
+                                   ConversionPatternRewriter &rewriter,
+                                   const LinearLayout &msgToOffset,
+                                   Value msgId, Value ctaId) {
+  MLIRContext *ctx = rewriter.getContext();
+  return applyLinearLayout(loc, rewriter, msgToOffset,
+                           {{str_attr("msg"), msgId},
+                            {str_attr("block"), ctaId}});
+}
+
 struct AsyncTMACopyGlobalToLocalOpConversion
     : public ConvertOpToLLVMPattern<
           triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp> {
@@ -1260,8 +1270,8 @@ struct AsyncTMACopyGlobalToLocalOpConversion
         tmaInst += ".multicast::cluster";
       tmaInst += " [$1], [$2, {";
 
-      auto offsets = applyLinearLayout(loc, rewriter, msgToOffset,
-                                       {{kMsg, copyIdxVal}, {kBlock, ctaId}});
+      auto offsets =
+          getCTALocalTileOffsets(loc, rewriter, msgToOffset, copyIdxVal, ctaId);
       int operandIdx = 3;
       auto encoding = op.getDesc().getType().getSharedLayout();
       bool fp4Padded = nvidia_gpu::isFp4Padded(encoding);
@@ -1375,8 +1385,8 @@ LogicalResult convertTMAStoreLikeOp(Operation *op,
         ptxBuilderTMA.newOperand(boxPred, "b"),
         ptxBuilderTMA.newOperand(tmaPtr, "l")};
 
-    auto offsets = applyLinearLayout(loc, rewriter, msgToOffset,
-                                     {{kMsg, copyIdxVal}, {kBlock, ctaId}});
+    auto offsets =
+        getCTALocalTileOffsets(loc, rewriter, msgToOffset, copyIdxVal, ctaId);
     bool fp4Padded = nvidia_gpu::isFp4Padded(srcTy.getEncoding());
     for (int i = 0; i < rank; i++) {
       Value coord = coords[rank - i - 1];
@@ -1559,8 +1569,8 @@ static LogicalResult iterateGatherScatterIndices(
 
   Value warpId = mlir::triton::gpu::WarpIdOp::create(rewriter, loc);
   Value blockId = nvgpu::ClusterCTAIdOp::create(rewriter, loc);
-  auto ctaOffsets = applyLinearLayout(
-      loc, rewriter, msgToOffset, {{kMsg, b.i32_val(0)}, {kBlock, blockId}});
+  auto ctaOffsets =
+      getCTALocalTileOffsets(loc, rewriter, msgToOffset, b.i32_val(0), blockId);
   assert(ctaOffsets.size() == 2 && ctaOffsets.back().first == kDim1);
   yOffsetValue = b.add(yOffsetValue, ctaOffsets.back().second);
 
