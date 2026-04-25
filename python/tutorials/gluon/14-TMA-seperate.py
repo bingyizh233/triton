@@ -4,13 +4,14 @@ Per-CTA TMA loads into a 2-CTA MMA tile
 
 This mirrors :file:`14-multicta-simple.py`, but loads **A** and **B** with
 **1-CTA** tensor descriptors (no ``cga_layout`` on the descriptor). The
-cluster shared-memory allocations are then viewed through CTA-local TMA
-memdescs, while the original cluster memdescs are kept for the 2-CTA MMA.
+cluster shared-memory allocations are then **reinterpreted** as local TMA
+memdescs whose ``cga_layout`` is broadcasted (``[(0, 0)]``), while the
+original cluster memdescs are kept for the 2-CTA MMA.
 
 Unlike a logical ``smem_a_cta0`` / ``smem_a_cta1`` view, this avoids
 ``memdesc.slice`` across CTA-sharded dimensions, which is not supported today.
-``local_cta_view`` verifies that the requested local shape is compatible with
-the source allocation's ``cga_layout``.
+The broadcasted ``cga_layout`` keeps the memdesc valid in a ``num_ctas=2``
+kernel while preserving the same per-CTA physical allocation size.
 
 This uses:
 
@@ -65,16 +66,24 @@ def two_cta_tcgen05_separate_tma_kernel(a_desc_1cta, b_desc_1cta, c_desc):
     b_cluster_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
         [K, tile_n], b_desc_1cta.dtype, cga_layout=[(0, 1)]
     )
+    a_tma_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
+        [cta_m, K], a_desc_1cta.dtype, cga_layout=[(0, 0)]
+    )
+    b_tma_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
+        [K, cta_n], b_desc_1cta.dtype, cga_layout=[(0, 0)]
+    )
 
     smem_a = gl.allocate_shared_memory(a_desc_1cta.dtype, [cluster_m, K], a_cluster_layout)
     smem_b = gl.allocate_shared_memory(b_desc_1cta.dtype, [K, tile_n], b_cluster_layout)
 
-    smem_a_local = smem_a.local_cta_view([cta_m, K])
-    smem_b_local = smem_b.local_cta_view([K, cta_n])
+    # Reinterpret the cluster allocations as local TMA views. The broadcasted
+    # cga_layout keeps the memdesc valid in a 2-CTA kernel.
+    smem_a_local = smem_a._reinterpret(a_desc_1cta.dtype, [cta_m, K], a_tma_layout)
+    smem_b_local = smem_b._reinterpret(b_desc_1cta.dtype, [K, cta_n], b_tma_layout)
 
     cid = cluster.cluster_cta_id()
     # The per-CTA coordinate selects which global tile this CTA loads into its
-    # local shared-memory view.
+    # local reinterpret view.
     a_coord = [cid * cta_m, 0]
     b_coord = [0, cid * cta_n]
 
