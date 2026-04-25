@@ -1168,14 +1168,11 @@ struct Conv2DIm2ColLoweredCoords {
 static Conv2DIm2ColLoweredCoords getConv2DIm2ColLoweredCoords(
     Location loc, ConversionPatternRewriter &rewriter,
     TritonLLVMOpBuilder &b, ValueRange args,
-    ArrayRef<std::pair<StringAttr, Value>> tileOffsets, Value ctaId,
-    int64_t ctaM, bool twoCTAs) {
+    ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
   assert(args.size() == 12 && "Conv2D im2col lowering expects 12 operands");
 
   Value logicalM = b.add(args[0], getTileOffsetForDim(rewriter, tileOffsets, 0));
   Value logicalK = b.add(args[1], getTileOffsetForDim(rewriter, tileOffsets, 1));
-  if (twoCTAs)
-    logicalM = b.add(logicalM, b.mul(ctaId, b.i32_val(ctaM)));
 
   Value p = args[2];
   Value q = args[3];
@@ -1340,8 +1337,7 @@ struct AsyncTMACopyGlobalToLocalOpConversion
       SmallVector<Value> im2colOffsets;
       if (isConv2DIm2Col) {
         auto lowered = getConv2DIm2ColLoweredCoords(
-            loc, rewriter, b, adaptor.getCoord(), offsets, ctaId,
-            dstTy.getShape()[0], ttg::lookupNumCTAs(op) > 1);
+            loc, rewriter, b, adaptor.getCoord(), offsets);
         tmaCoords.append(lowered.coords.begin(), lowered.coords.end());
         im2colOffsets.append(lowered.offsets.begin(), lowered.offsets.end());
       } else {

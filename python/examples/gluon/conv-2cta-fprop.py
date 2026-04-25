@@ -11,8 +11,9 @@ two_ctas=True``, and the epilogue TMA-stores each tile in N-subtiles.
 
 Compiler gotcha (2026-04-23): calling ``cluster.cluster_cta_id()`` directly
 from this user kernel breaks Gluon's tile-level programming model and has
-caused warp-specialization miscompiles. CTA-local offsets are hidden behind
-the TMA frontend helpers and materialized in the kernel entry.
+caused warp-specialization miscompiles. TMA destinations use cluster-wide
+shared-memory tiles with cga_layout; LLVM lowering derives the per-CTA
+TMA coordinates from the destination layout.
 
 Cluster contract:
     CGA_LAYOUT = ((1, 0),)                       # 2-CTA M-split
@@ -322,7 +323,6 @@ class ClcTileSchedulerConsumer:
 @aggregate
 class V4Args:
     config: V4Config
-    cta_n_offset: gl.tensor
     a_desc: tma.tensor_descriptor_im2col
     b_desc: tma.tensor_descriptor
     c_desc: tma.tensor_descriptor
@@ -358,16 +358,18 @@ class V4Args:
 
 @gluon.jit
 def _v4_load(p):
-    """Producer: per-CTA TMA loads into the cluster-partitioned SMEM ring.
+    """Producer: TMA loads into the cluster-partitioned SMEM ring.
 
-    Each CTA loads ``[CTA_M, BLOCK_K]`` of A (M-split) and
-    ``[BLOCK_K, CTA_N]`` of B (N-split) per iteration. ``load_ready_bars``
-    is two_ctas=True so MMA waits for both CTAs' TMAs to complete.
+    The descriptors and SMEM buffers are cluster-wide tiles. TMA lowering
+    derives per-CTA coordinates from the destination cga_layout, and
+    load_ready_bars is two_ctas=True so MMA waits for both CTAs.
     """
     a_desc = p.a_desc
     b_desc = p.b_desc
-    CTA_M: gl.constexpr = a_desc.block_shape[0]
-    CTA_N: gl.constexpr = b_desc.block_shape[1]
+    TILE_M: gl.constexpr = a_desc.block_shape[0]
+    TILE_N: gl.constexpr = b_desc.block_shape[1]
+    CTA_M: gl.constexpr = TILE_M // gl.num_ctas()
+    CTA_N: gl.constexpr = TILE_N // get_split_dim(b_desc.layout.cga_layout, 1)
     BLOCK_K: gl.constexpr = a_desc.block_shape[1]
     config = p.config
     num_k_iter = config.get_num_k_iterations()
@@ -382,9 +384,6 @@ def _v4_load(p):
             a_stage = p.a_bufs.index(state.index)
             b_stage = p.b_bufs.index(state.index)
             mbarrier.wait(p.load_empty_bars.index(state.index), state.phase, deps=[a_stage, b_stage])
-            a_stage_local = a_stage.local_cta_view([CTA_M, BLOCK_K])
-            b_stage_local = b_stage.local_cta_view([BLOCK_K, CTA_N])
-
             iter_ci = k_iter // (config.R * config.S)
             remain_rs = k_iter % (config.R * config.S)
             iter_s = remain_rs % config.S
@@ -412,11 +411,9 @@ def _v4_load(p):
                 ),
                 [off_m, k_offset],
                 bar,
-                a_stage_local,
+                a_stage,
             )
-            tma.async_copy_global_to_shared_cta_split(
-                b_desc, [k_offset, off_n], 1, bar, b_stage_local, p.cta_n_offset,
-            )
+            tma.async_copy_global_to_shared(b_desc, [k_offset, off_n], bar, b_stage)
             state = state.next()
         scheduler = scheduler.step(i)
         i += 1
@@ -557,19 +554,21 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
     """V4: warp-specialized, 3 partitions (epilogue, load, MMA), ring
     buffers, multicast cluster MMA, TMA-store epilogue. No CLC."""
     gl.static_assert(gl.num_ctas() == 2)
-    CTA_M: gl.constexpr = a_desc.block_shape[0]
-    CTA_N: gl.constexpr = b_desc.block_shape[1]
+    TILE_M: gl.constexpr = a_desc.block_shape[0]
+    TILE_N: gl.constexpr = b_desc.block_shape[1]
+    CTA_M: gl.constexpr = TILE_M // gl.num_ctas()
+    CTA_N: gl.constexpr = TILE_N // get_split_dim(b_desc.layout.cga_layout, 1)
     BLOCK_K: gl.constexpr = a_desc.block_shape[1]
-    TILE_M: gl.constexpr = c_desc.block_shape[0]
+    TILE_M_C: gl.constexpr = c_desc.block_shape[0]
     EPILOGUE_BLOCK_N: gl.constexpr = c_desc.block_shape[1]
     cga_layout: gl.constexpr = c_desc.layout.cga_layout
     a_cga_layout: gl.constexpr = _get_operand_cga_layout(cga_layout, 0)
     b_cga_layout: gl.constexpr = _get_operand_cga_layout(cga_layout, 1)
-    TILE_N: gl.constexpr = CTA_N * get_split_dim(b_cga_layout, 1)
 
     gl.static_assert(get_split_dim(cga_layout, 0) == gl.num_ctas())
-    gl.static_assert(TILE_M == CTA_M * 2)
+    gl.static_assert(TILE_M == CTA_M * gl.num_ctas())
     gl.static_assert(c_desc.block_shape[0] == TILE_M)
+    gl.static_assert(TILE_M_C == TILE_M)
     gl.static_assert(TILE_N % EPILOGUE_BLOCK_N == 0)
 
     M_GEMM = N * out_h * out_w
@@ -582,7 +581,6 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
         gl.to_tensor(Ci), M_GEMM,
         TILE_M, TILE_N, CTA_M, CTA_N, BLOCK_K, GROUP_SIZE_M,
     )
-    cta_n_offset = tma.cta_split_offset(CTA_N)
     # Cluster-aware SMEM layouts: A is M-split across CTAs, B is N-split.
     a_smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
         [TILE_M, BLOCK_K], a_desc.dtype, cga_layout=a_cga_layout,
@@ -637,7 +635,6 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
 
     p = V4Args(
         config,
-        cta_n_offset,
         a_desc, b_desc, c_desc,
         a_bufs, b_bufs,
         acc_bufs,
@@ -716,14 +713,15 @@ def _make_descriptors(
 ):
     tile_m = block_size_m * get_split_dim(cga_layout, 0)
     tile_n = block_size_n
-    local_tile_n = tile_n // get_split_dim(_get_operand_cga_layout(cga_layout, 1), 1)
+    a_cga_layout = _get_operand_cga_layout(cga_layout, 0)
+    b_cga_layout = _get_operand_cga_layout(cga_layout, 1)
 
-    a_block = [block_size_m, block_size_k]
-    b_block = [block_size_k, local_tile_n]
+    a_block = [tile_m, block_size_k]
+    b_block = [block_size_k, tile_n]
     c_block = [tile_m, epilogue_block_n]
 
-    a_layout = gl.NVMMASharedLayout.get_default_for(a_block, GL_GEMM_DTYPE)
-    b_layout = gl.NVMMASharedLayout.get_default_for(b_block, GL_GEMM_DTYPE)
+    a_layout = gl.NVMMASharedLayout.get_default_for(a_block, GL_GEMM_DTYPE, cga_layout=a_cga_layout)
+    b_layout = gl.NVMMASharedLayout.get_default_for(b_block, GL_GEMM_DTYPE, cga_layout=b_cga_layout)
     c_layout = gl.NVMMASharedLayout.get_default_for(c_block, GL_GEMM_DTYPE, cga_layout=cga_layout)
 
     _, H, W, _ = input_tensor.shape
