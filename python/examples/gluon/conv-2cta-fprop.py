@@ -322,7 +322,6 @@ class ClcTileSchedulerConsumer:
 @aggregate
 class V4Args:
     config: V4Config
-    cta_m_offset: gl.tensor
     cta_n_offset: gl.tensor
     a_desc: tma.tensor_descriptor_im2col
     b_desc: tma.tensor_descriptor
@@ -414,7 +413,6 @@ def _v4_load(p):
                 [off_m, k_offset],
                 bar,
                 a_stage_local,
-                p.cta_m_offset,
             )
             tma.async_copy_global_to_shared_cta_split(
                 b_desc, [k_offset, off_n], 1, bar, b_stage_local, p.cta_n_offset,
@@ -584,7 +582,6 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
         gl.to_tensor(Ci), M_GEMM,
         TILE_M, TILE_N, CTA_M, CTA_N, BLOCK_K, GROUP_SIZE_M,
     )
-    cta_m_offset = tma.cta_split_offset(CTA_M)
     cta_n_offset = tma.cta_split_offset(CTA_N)
     # Cluster-aware SMEM layouts: A is M-split across CTAs, B is N-split.
     a_smem_layout: gl.constexpr = gl.NVMMASharedLayout.get_default_for(
@@ -640,7 +637,7 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
 
     p = V4Args(
         config,
-        cta_m_offset, cta_n_offset,
+        cta_n_offset,
         a_desc, b_desc, c_desc,
         a_bufs, b_bufs,
         acc_bufs,

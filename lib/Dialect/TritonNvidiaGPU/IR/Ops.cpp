@@ -460,12 +460,23 @@ static bool isIm2ColDescriptor(Type descType) {
   return isa<TensorDescIm2ColType>(descType);
 }
 
+static bool isConv2DIm2ColOp(Operation *op) {
+  return op->hasAttr("ttng.im2col_conv2d");
+}
+
 static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
                                           TensorDescInterface desc,
                                           bool isIm2Col) {
   unsigned blockRank = desc.getShape().size();
 
   if (isIm2Col) {
+    if (isConv2DIm2ColOp(op)) {
+      if (coords.size() != 12)
+        return op->emitOpError(
+                   "Conv2D IM2COL mode expects 12 logical operands, but got ")
+               << coords.size();
+      return success();
+    }
     // For IM2COL mode, coordinates are for the full tensor (3D-5D)
     // not the 2D block shape
     if (coords.size() < 3)
@@ -491,6 +502,11 @@ static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
 static LogicalResult verifyTMAMode(Operation *op, bool isIm2Col,
                                    ValueRange coords, ValueRange offsets) {
   if (isIm2Col) {
+    if (isConv2DIm2ColOp(op)) {
+      if (!offsets.empty())
+        return op->emitOpError("Conv2D IM2COL mode derives offsets in lowering");
+      return success();
+    }
     if (offsets.empty())
       return op->emitOpError("IM2COL mode requires offsets to be provided");
 

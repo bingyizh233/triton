@@ -352,7 +352,6 @@ def async_load_im2col_conv2d(
     logical_offsets,
     barrier,
     result,
-    cta_m_offset=None,
     pred=True,
     multicast=False,
     _semantic=None,
@@ -361,9 +360,9 @@ def async_load_im2col_conv2d(
     Load a Conv2D activation tile through im2col using cluster-level GEMM coordinates.
 
     ``logical_offsets`` is ``[m_offset, k_offset]`` where ``m`` indexes
-    ``N * P * Q`` and ``k`` indexes ``R * S * C``. This wrapper makes the
-    convolution metadata visible at the Gluon API layer while preserving the
-    existing 1CTA im2col lowering path.
+    ``N * P * Q`` and ``k`` indexes ``R * S * C``. The operation keeps those
+    logical coordinates visible to lowering so CTA-local M offsets can be
+    derived from the destination tile without user-visible CTA-id plumbing.
     """
     conv_problem = _unwrap_if_constexpr(conv_problem)
     if not isinstance(conv_problem, Conv2DProblem):
@@ -371,42 +370,31 @@ def async_load_im2col_conv2d(
     if len(logical_offsets) != 2:
         raise ValueError(f"async_load_im2col_conv2d expects [m_offset, k_offset], got {len(logical_offsets)} values")
 
-    logical_m = ttgl.to_tensor(logical_offsets[0], _semantic=_semantic)
-    logical_k = ttgl.to_tensor(logical_offsets[1], _semantic=_semantic)
-    if _unwrap_if_constexpr(_semantic.num_ctas()) > 1:
-        if cta_m_offset is None:
-            cta_m_offset = cta_split_offset(result.shape[0], _semantic=_semantic)
-        logical_m = logical_m.__add__(ttgl.to_tensor(cta_m_offset, _semantic=_semantic), _semantic=_semantic)
-
-    p = ttgl.to_tensor(conv_problem.p, _semantic=_semantic)
-    q = ttgl.to_tensor(conv_problem.q, _semantic=_semantic)
-    c = ttgl.to_tensor(conv_problem.c, _semantic=_semantic)
-    s = ttgl.to_tensor(conv_problem.s, _semantic=_semantic)
-    stride_h = ttgl.to_tensor(conv_problem.stride_h, _semantic=_semantic)
-    stride_w = ttgl.to_tensor(conv_problem.stride_w, _semantic=_semantic)
-    pad_h = ttgl.to_tensor(conv_problem.pad_h, _semantic=_semantic)
-    pad_w = ttgl.to_tensor(conv_problem.pad_w, _semantic=_semantic)
-    dilation_h = ttgl.to_tensor(conv_problem.dilation_h, _semantic=_semantic)
-    dilation_w = ttgl.to_tensor(conv_problem.dilation_w, _semantic=_semantic)
-
-    pq = p.__mul__(q, _semantic=_semantic)
-    batch = logical_m.__floordiv__(pq, _semantic=_semantic)
-    rem_m = logical_m.__mod__(pq, _semantic=_semantic)
-    out_y = rem_m.__floordiv__(q, _semantic=_semantic)
-    out_x = rem_m.__mod__(q, _semantic=_semantic)
-
-    channel = logical_k.__mod__(c, _semantic=_semantic)
-    rs = logical_k.__floordiv__(c, _semantic=_semantic)
-    filter_r = rs.__floordiv__(s, _semantic=_semantic)
-    filter_s = rs.__mod__(s, _semantic=_semantic)
-
-    in_y = out_y.__mul__(stride_h, _semantic=_semantic).__sub__(pad_h, _semantic=_semantic)
-    in_x = out_x.__mul__(stride_w, _semantic=_semantic).__sub__(pad_w, _semantic=_semantic)
-    offset_r = filter_r.__mul__(dilation_h, _semantic=_semantic).to(ttgl.int16, _semantic=_semantic)
-    offset_s = filter_s.__mul__(dilation_w, _semantic=_semantic).to(ttgl.int16, _semantic=_semantic)
-
-    async_load_im2col(tensor_desc, [batch, in_y, in_x, channel], [offset_r, offset_s], barrier, result, pred,
-                      multicast, _semantic=_semantic)
+    conv_args = [
+        ttgl.to_tensor(logical_offsets[0], _semantic=_semantic),
+        ttgl.to_tensor(logical_offsets[1], _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.p, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.q, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.c, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.s, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.stride_h, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.stride_w, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.pad_h, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.pad_w, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.dilation_h, _semantic=_semantic),
+        ttgl.to_tensor(conv_problem.dilation_w, _semantic=_semantic),
+    ]
+    conv_args_ir = _semantic._convert_to_ir_values(conv_args, require_i64=False)
+    pred = _semantic.to_tensor(pred)
+    multicast = _unwrap_if_constexpr(multicast)
+    _semantic.builder.create_async_tma_copy_global_to_local_im2col_conv2d(
+        tensor_desc.handle,
+        conv_args_ir,
+        barrier.handle,
+        result.handle,
+        pred.handle,
+        multicast,
+    )
 
 
 @builtin

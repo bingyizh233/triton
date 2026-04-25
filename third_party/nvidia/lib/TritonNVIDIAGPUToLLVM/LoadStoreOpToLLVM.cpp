@@ -1144,6 +1144,69 @@ static auto getCTALocalTileOffsets(Location loc,
                             {str_attr("block"), ctaId}});
 }
 
+static bool isConv2DIm2ColOp(Operation *op) {
+  return op->hasAttr("ttng.im2col_conv2d");
+}
+
+static Value getTileOffsetForDim(ConversionPatternRewriter &rewriter,
+                                 ArrayRef<std::pair<StringAttr, Value>> offsets,
+                                 int dim) {
+  auto name =
+      StringAttr::get(rewriter.getContext(), ("dim" + Twine(dim)).str());
+  for (auto offset : offsets) {
+    if (offset.first == name)
+      return offset.second;
+  }
+  return TritonLLVMOpBuilder(rewriter.getUnknownLoc(), rewriter).i32_val(0);
+}
+
+struct Conv2DIm2ColLoweredCoords {
+  SmallVector<Value, 4> coords;
+  SmallVector<Value, 2> offsets;
+};
+
+static Conv2DIm2ColLoweredCoords getConv2DIm2ColLoweredCoords(
+    Location loc, ConversionPatternRewriter &rewriter,
+    TritonLLVMOpBuilder &b, ValueRange args,
+    ArrayRef<std::pair<StringAttr, Value>> tileOffsets, Value ctaId,
+    int64_t ctaM, bool twoCTAs) {
+  assert(args.size() == 12 && "Conv2D im2col lowering expects 12 operands");
+
+  Value logicalM = b.add(args[0], getTileOffsetForDim(rewriter, tileOffsets, 0));
+  Value logicalK = b.add(args[1], getTileOffsetForDim(rewriter, tileOffsets, 1));
+  if (twoCTAs)
+    logicalM = b.add(logicalM, b.mul(ctaId, b.i32_val(ctaM)));
+
+  Value p = args[2];
+  Value q = args[3];
+  Value c = args[4];
+  Value s = args[5];
+  Value strideH = args[6];
+  Value strideW = args[7];
+  Value padH = args[8];
+  Value padW = args[9];
+  Value dilationH = args[10];
+  Value dilationW = args[11];
+
+  Value pq = b.mul(p, q);
+  Value batch = b.udiv(logicalM, pq);
+  Value remM = b.urem(logicalM, pq);
+  Value outY = b.udiv(remM, q);
+  Value outX = b.urem(remM, q);
+
+  Value channel = b.urem(logicalK, c);
+  Value rs = b.udiv(logicalK, c);
+  Value filterR = b.udiv(rs, s);
+  Value filterS = b.urem(rs, s);
+
+  Value inY = b.sub(b.mul(outY, strideH), padH);
+  Value inX = b.sub(b.mul(outX, strideW), padW);
+  Value offsetR = b.trunc(i16_ty, b.mul(filterR, dilationH));
+  Value offsetS = b.trunc(i16_ty, b.mul(filterS, dilationW));
+
+  return {{batch, inY, inX, channel}, {offsetR, offsetS}};
+}
+
 struct AsyncTMACopyGlobalToLocalOpConversion
     : public ConvertOpToLLVMPattern<
           triton::nvidia_gpu::AsyncTMACopyGlobalToLocalOp> {
@@ -1192,7 +1255,8 @@ struct AsyncTMACopyGlobalToLocalOpConversion
 
     auto smemTy = op.getResult().getType();
 
-    int rank = op.getCoord().size();
+    bool isConv2DIm2Col = isIm2Col && isConv2DIm2ColOp(op);
+    int rank = isConv2DIm2Col ? 4 : op.getCoord().size();
 
     auto msgToPackedOffset = getMsgToPackedOffsetLayout(smemTy, tmaMode);
     auto smemLayout = ttg::toLinearLayout(smemTy);
@@ -1272,15 +1336,29 @@ struct AsyncTMACopyGlobalToLocalOpConversion
 
       auto offsets =
           getCTALocalTileOffsets(loc, rewriter, msgToOffset, copyIdxVal, ctaId);
+      SmallVector<Value> tmaCoords;
+      SmallVector<Value> im2colOffsets;
+      if (isConv2DIm2Col) {
+        auto lowered = getConv2DIm2ColLoweredCoords(
+            loc, rewriter, b, adaptor.getCoord(), offsets, ctaId,
+            dstTy.getShape()[0], ttg::lookupNumCTAs(op) > 1);
+        tmaCoords.append(lowered.coords.begin(), lowered.coords.end());
+        im2colOffsets.append(lowered.offsets.begin(), lowered.offsets.end());
+      } else {
+        tmaCoords.append(adaptor.getCoord().begin(), adaptor.getCoord().end());
+        im2colOffsets.append(adaptor.getOffsets().begin(),
+                             adaptor.getOffsets().end());
+      }
+
       int operandIdx = 3;
       auto encoding = op.getDesc().getType().getSharedLayout();
       bool fp4Padded = nvidia_gpu::isFp4Padded(encoding);
       for (int i = 0; i < rank; i++) {
-        Value coord = adaptor.getCoord()[rank - i - 1];
+        Value coord = tmaCoords[rank - i - 1];
         if (fp4Padded && i == 0) {
           coord = b.mul(coord, b.i32_val(2));
         }
-        if (i < offsets.size())
+        if (!isConv2DIm2Col && i < offsets.size())
           coord = b.add(coord, offsets[offsets.size() - i - 1].second);
 
         operands.push_back(ptxBuilderTMA.newOperand(coord, "r"));
@@ -1295,7 +1373,6 @@ struct AsyncTMACopyGlobalToLocalOpConversion
         tmaInst += ", $" + std::to_string(operandIdx++);
       }
       if (isIm2Col) {
-        auto im2colOffsets = adaptor.getOffsets();
         if (!im2colOffsets.empty()) {
           tmaInst += ", {";
           for (size_t i = 0; i < im2colOffsets.size(); i++) {
