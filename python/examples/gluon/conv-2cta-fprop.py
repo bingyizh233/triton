@@ -366,10 +366,6 @@ def _v4_load(p):
     """
     a_desc = p.a_desc
     b_desc = p.b_desc
-    TILE_M: gl.constexpr = a_desc.block_shape[0]
-    TILE_N: gl.constexpr = b_desc.block_shape[1]
-    CTA_M: gl.constexpr = TILE_M // gl.num_ctas()
-    CTA_N: gl.constexpr = TILE_N // get_split_dim(b_desc.layout.cga_layout, 1)
     BLOCK_K: gl.constexpr = a_desc.block_shape[1]
     config = p.config
     num_k_iter = config.get_num_k_iterations()
