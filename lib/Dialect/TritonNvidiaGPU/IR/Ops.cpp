@@ -471,10 +471,18 @@ static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
 
   if (isIm2Col) {
     if (isConv2DIm2ColOp(op)) {
-      if (coords.size() != 12)
+      if (coords.size() != 3)
         return op->emitOpError(
-                   "Conv2D IM2COL mode expects 12 logical operands, but got ")
-               << coords.size();
+                   "Conv2D IM2COL mode expects logical_m, logical_k, and C, "
+                   "but got ")
+               << coords.size() << " operands";
+      auto im2colTy = cast<TensorDescIm2ColType>(desc);
+      if (!im2colTy.getConvOutputShape() || !im2colTy.getConvFilterS() ||
+          !im2colTy.getElementStrides() ||
+          !im2colTy.getPixelBoxLowerCorner())
+        return op->emitOpError(
+            "Conv2D IM2COL mode requires Conv2D metadata on the descriptor "
+            "type");
       return success();
     }
     // For IM2COL mode, coordinates are for the full tensor (3D-5D)

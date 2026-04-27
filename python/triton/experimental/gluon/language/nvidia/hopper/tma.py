@@ -101,8 +101,15 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
 
     def _to_ir(self, builder: ir.builder) -> ir.type:
         is_signed = self.block_type.element_ty.is_int_signed()
-        return builder.get_tensor_descriptor_im2col_layout_type(self.block_type.to_ir(builder), is_signed,
-                                                                self.layout._to_ir(builder))
+        return builder.get_tensor_descriptor_im2col_layout_type(
+            self.block_type.to_ir(builder),
+            is_signed,
+            self.layout._to_ir(builder),
+            self.conv_output_shape,
+            self.conv_filter_s,
+            self.element_strides,
+            self.pixel_box_lower_corner,
+        )
 
     def _unflatten_ir(self, handles: List[ir.value], cursor: int) -> Tuple[base_value, int]:
         handle = handles[cursor]
@@ -305,8 +312,6 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
         stride_w = ttgl.to_tensor(element_strides[2], _semantic=_semantic)
         pad_h = ttgl.to_tensor(-pixel_box_lower_corner[0], _semantic=_semantic)
         pad_w = ttgl.to_tensor(-pixel_box_lower_corner[1], _semantic=_semantic)
-        one = ttgl.to_tensor(1, _semantic=_semantic)
-
         out_y = in_y.__add__(pad_h, _semantic=_semantic).__floordiv__(stride_h, _semantic=_semantic)
         out_x = in_x.__add__(pad_w, _semantic=_semantic).__floordiv__(stride_w, _semantic=_semantic)
         out_hw = out_h.__mul__(out_w, _semantic=_semantic)
@@ -316,10 +321,7 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
         logical_k = offset_r.__mul__(filter_s, _semantic=_semantic).__add__(offset_s, _semantic=_semantic)
         logical_k = logical_k.__mul__(c, _semantic=_semantic).__add__(channel, _semantic=_semantic)
 
-        conv_args = [
-            logical_m, logical_k, out_h, out_w, c, filter_s,
-            stride_h, stride_w, pad_h, pad_w, one, one,
-        ]
+        conv_args = [logical_m, logical_k, c]
         conv_args_ir = _semantic._convert_to_ir_values(conv_args, require_i64=False)
         _semantic.builder.create_async_tma_copy_global_to_local_im2col_conv2d(
             tensor_desc.handle,

@@ -1165,25 +1165,36 @@ struct Conv2DIm2ColLoweredCoords {
   SmallVector<Value, 2> offsets;
 };
 
+static int64_t getI64AttrValue(Attribute attr) {
+  return cast<IntegerAttr>(attr).getInt();
+}
+
+static int64_t getI64ArrayValue(Attribute attr, unsigned index) {
+  return cast<DenseI64ArrayAttr>(attr).asArrayRef()[index];
+}
+
 static Conv2DIm2ColLoweredCoords getConv2DIm2ColLoweredCoords(
     Location loc, ConversionPatternRewriter &rewriter,
-    TritonLLVMOpBuilder &b, ValueRange args,
-    ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
-  assert(args.size() == 12 && "Conv2D im2col lowering expects 12 operands");
+    TritonLLVMOpBuilder &b, ttng::TensorDescIm2ColType descType,
+    ValueRange args, ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
+  assert(args.size() == 3 &&
+         "Conv2D im2col lowering expects logical_m, logical_k, and C");
 
   Value logicalM = b.add(args[0], getTileOffsetForDim(rewriter, tileOffsets, 0));
   Value logicalK = b.add(args[1], getTileOffsetForDim(rewriter, tileOffsets, 1));
 
-  Value p = args[2];
-  Value q = args[3];
-  Value c = args[4];
-  Value s = args[5];
-  Value strideH = args[6];
-  Value strideW = args[7];
-  Value padH = args[8];
-  Value padW = args[9];
-  Value dilationH = args[10];
-  Value dilationW = args[11];
+  Value p = b.i32_val(getI64ArrayValue(descType.getConvOutputShape(), 0));
+  Value q = b.i32_val(getI64ArrayValue(descType.getConvOutputShape(), 1));
+  Value c = args[2];
+  Value s = b.i32_val(getI64AttrValue(descType.getConvFilterS()));
+  Value strideH = b.i32_val(getI64ArrayValue(descType.getElementStrides(), 1));
+  Value strideW = b.i32_val(getI64ArrayValue(descType.getElementStrides(), 2));
+  Value padH =
+      b.i32_val(-getI64ArrayValue(descType.getPixelBoxLowerCorner(), 0));
+  Value padW =
+      b.i32_val(-getI64ArrayValue(descType.getPixelBoxLowerCorner(), 1));
+  Value dilationH = b.i32_val(1);
+  Value dilationW = b.i32_val(1);
 
   Value pq = b.mul(p, q);
   Value batch = b.udiv(logicalM, pq);
@@ -1337,7 +1348,8 @@ struct AsyncTMACopyGlobalToLocalOpConversion
       SmallVector<Value> im2colOffsets;
       if (isConv2DIm2Col) {
         auto lowered = getConv2DIm2ColLoweredCoords(
-            loc, rewriter, b, adaptor.getCoord(), offsets);
+            loc, rewriter, b, cast<ttng::TensorDescIm2ColType>(descType),
+            adaptor.getCoord(), offsets);
         tmaCoords.append(lowered.coords.begin(), lowered.coords.end());
         im2colOffsets.append(lowered.offsets.begin(), lowered.offsets.end());
       } else {

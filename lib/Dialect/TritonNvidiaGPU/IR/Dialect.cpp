@@ -496,6 +496,52 @@ LogicalResult impl::verifyMMAv5Op(Operation *op) {
 //===----------------------------------------------------------------------===//
 // Format: !ttng.tensordesc_im2col<64x128xf16>
 //         !ttng.tensordesc_im2col<64x128xf16, #shared>
+//         !ttng.tensordesc_im2col<64x128xf16, #shared,
+//             conv_output_shape = [64, 64], conv_filter_s = 3,
+//             element_strides = [1, 1, 1, 1],
+//             pixel_box_lower_corner = [-1, -1]>
+namespace {
+FailureOr<Attribute> parseI64ArrayAttr(AsmParser &parser) {
+  SmallVector<int64_t> values;
+  if (failed(parser.parseLSquare()))
+    return failure();
+  if (failed(parser.parseOptionalRSquare())) {
+    do {
+      int64_t value;
+      if (failed(parser.parseInteger(value)))
+        return failure();
+      values.push_back(value);
+    } while (succeeded(parser.parseOptionalComma()));
+    if (failed(parser.parseRSquare()))
+      return failure();
+  }
+  return DenseI64ArrayAttr::get(parser.getContext(), values);
+}
+
+ParseResult parseI64Attr(AsmParser &parser, Attribute &attr) {
+  int64_t value;
+  if (failed(parser.parseInteger(value)))
+    return failure();
+  attr = IntegerAttr::get(IntegerType::get(parser.getContext(), 64), value);
+  return success();
+}
+
+void printI64ArrayAttr(AsmPrinter &printer, StringRef name, Attribute attr) {
+  if (!attr)
+    return;
+  auto arrayAttr = cast<DenseI64ArrayAttr>(attr);
+  printer << ", " << name << " = [";
+  llvm::interleaveComma(arrayAttr.asArrayRef(), printer);
+  printer << "]";
+}
+
+void printI64Attr(AsmPrinter &printer, StringRef name, Attribute attr) {
+  if (!attr)
+    return;
+  printer << ", " << name << " = " << cast<IntegerAttr>(attr).getInt();
+}
+} // namespace
+
 Type TensorDescIm2ColType::parse(AsmParser &parser) {
   if (failed(parser.parseLess()))
     return Type();
@@ -509,17 +555,69 @@ Type TensorDescIm2ColType::parse(AsmParser &parser) {
     return Type();
 
   Attribute sharedLayout;
+  Attribute convOutputShape;
+  Attribute convFilterS;
+  Attribute elementStrides;
+  Attribute pixelBoxLowerCorner;
+
+  auto parseMetadata = [&]() -> std::optional<ParseResult> {
+    if (succeeded(parser.parseOptionalKeyword("conv_output_shape"))) {
+      if (failed(parser.parseEqual()))
+        return failure();
+      auto attr = parseI64ArrayAttr(parser);
+      if (failed(attr))
+        return failure();
+      convOutputShape = *attr;
+      return success();
+    }
+    if (succeeded(parser.parseOptionalKeyword("conv_filter_s"))) {
+      if (failed(parser.parseEqual()))
+        return failure();
+      return parseI64Attr(parser, convFilterS);
+    }
+    if (succeeded(parser.parseOptionalKeyword("element_strides"))) {
+      if (failed(parser.parseEqual()))
+        return failure();
+      auto attr = parseI64ArrayAttr(parser);
+      if (failed(attr))
+        return failure();
+      elementStrides = *attr;
+      return success();
+    }
+    if (succeeded(parser.parseOptionalKeyword("pixel_box_lower_corner"))) {
+      if (failed(parser.parseEqual()))
+        return failure();
+      auto attr = parseI64ArrayAttr(parser);
+      if (failed(attr))
+        return failure();
+      pixelBoxLowerCorner = *attr;
+      return success();
+    }
+    return std::nullopt;
+  };
+
   if (succeeded(parser.parseOptionalComma())) {
-    if (failed(parser.parseAttribute(sharedLayout)))
+    auto metadata = parseMetadata();
+    if (!metadata.has_value()) {
+      if (failed(parser.parseAttribute(sharedLayout)))
+        return Type();
+    } else if (failed(*metadata)) {
       return Type();
+    }
+    while (succeeded(parser.parseOptionalComma())) {
+      metadata = parseMetadata();
+      if (!metadata.has_value() || failed(*metadata))
+        return Type();
+    }
   }
 
   if (failed(parser.parseGreater()))
     return Type();
 
   Location loc = parser.getEncodedSourceLoc(parser.getCurrentLocation());
-  return TensorDescIm2ColType::getChecked(loc, parser.getContext(), shape,
-                                          elementType, sharedLayout);
+  return TensorDescIm2ColType::getChecked(
+      loc, parser.getContext(), shape, elementType, sharedLayout,
+      convOutputShape, convFilterS, elementStrides, pixelBoxLowerCorner);
 }
 
 void TensorDescIm2ColType::print(AsmPrinter &printer) const {
@@ -529,6 +627,11 @@ void TensorDescIm2ColType::print(AsmPrinter &printer) const {
   printer << getElementType();
   if (getSharedLayout())
     printer << ", " << getSharedLayout();
+  printI64ArrayAttr(printer, "conv_output_shape", getConvOutputShape());
+  printI64Attr(printer, "conv_filter_s", getConvFilterS());
+  printI64ArrayAttr(printer, "element_strides", getElementStrides());
+  printI64ArrayAttr(printer, "pixel_box_lower_corner",
+                    getPixelBoxLowerCorner());
   printer << ">";
 }
 
@@ -538,12 +641,39 @@ void TensorDescIm2ColType::print(AsmPrinter &printer) const {
 LogicalResult
 TensorDescIm2ColType::verify(function_ref<InFlightDiagnostic()> emitError,
                              ArrayRef<int64_t> shape, Type elementType,
-                             Attribute sharedLayout) {
+                             Attribute sharedLayout,
+                             Attribute convOutputShape, Attribute convFilterS,
+                             Attribute elementStrides,
+                             Attribute pixelBoxLowerCorner) {
   if (shape.size() != 2) {
     return emitError()
            << "TensorDescIm2ColType requires rank-2 shape, got rank "
            << shape.size();
   }
+
+  bool hasConvMetadata = convOutputShape || convFilterS || elementStrides ||
+                         pixelBoxLowerCorner;
+  if (!hasConvMetadata)
+    return success();
+  if (!convOutputShape || !convFilterS || !elementStrides ||
+      !pixelBoxLowerCorner)
+    return emitError() << "Conv2D im2col metadata requires "
+                          "conv_output_shape, conv_filter_s, "
+                          "element_strides, and pixel_box_lower_corner";
+
+  auto outputShape = dyn_cast<DenseI64ArrayAttr>(convOutputShape);
+  auto strides = dyn_cast<DenseI64ArrayAttr>(elementStrides);
+  auto lower = dyn_cast<DenseI64ArrayAttr>(pixelBoxLowerCorner);
+  auto filterS = dyn_cast<IntegerAttr>(convFilterS);
+  if (!outputShape || outputShape.asArrayRef().size() != 2)
+    return emitError() << "conv_output_shape must be an i64 array of length 2";
+  if (!strides || strides.asArrayRef().size() != 4)
+    return emitError() << "element_strides must be an i64 array of length 4";
+  if (!lower || lower.asArrayRef().size() != 2)
+    return emitError()
+           << "pixel_box_lower_corner must be an i64 array of length 2";
+  if (!filterS || filterS.getInt() <= 0)
+    return emitError() << "conv_filter_s must be a positive integer";
   return success();
 }
 

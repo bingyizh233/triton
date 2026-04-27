@@ -66,7 +66,11 @@ def TTNG_TensorDescIm2ColType : TTNG_TypeDef<"TensorDescIm2Col", "tensordesc_im2
   let parameters = (ins
     ArrayRefParameter<"int64_t">:$shape,
     "Type":$elementType,
-    OptionalParameter<"Attribute">:$sharedLayout
+    OptionalParameter<"Attribute">:$sharedLayout,
+    OptionalParameter<"Attribute">:$convOutputShape,
+    OptionalParameter<"Attribute">:$convFilterS,
+    OptionalParameter<"Attribute">:$elementStrides,
+    OptionalParameter<"Attribute">:$pixelBoxLowerCorner
   );
 
   let builders = [
@@ -80,7 +84,26 @@ def TTNG_TensorDescIm2ColType : TTNG_TypeDef<"TensorDescIm2Col", "tensordesc_im2
         auto sem = isSigned ? IntegerType::Signed : IntegerType::Unsigned;
         elementType = IntegerType::get(elementType.getContext(), intTy.getWidth(), sem);
       }
-      return $_get(elementType.getContext(), shape, elementType, sharedLayout);
+      return $_get(elementType.getContext(), shape, elementType, sharedLayout,
+                   Attribute(), Attribute(), Attribute(), Attribute());
+    }]>,
+    TypeBuilderWithInferredContext<(ins
+      "llvm::ArrayRef<int64_t>":$shape,
+      "Type":$elementType,
+      "Attribute":$sharedLayout,
+      "Attribute":$convOutputShape,
+      "Attribute":$convFilterS,
+      "Attribute":$elementStrides,
+      "Attribute":$pixelBoxLowerCorner,
+      "bool":$isSigned
+    ), [{
+      if (auto intTy = llvm::dyn_cast<IntegerType>(elementType)) {
+        auto sem = isSigned ? IntegerType::Signed : IntegerType::Unsigned;
+        elementType = IntegerType::get(elementType.getContext(), intTy.getWidth(), sem);
+      }
+      return $_get(elementType.getContext(), shape, elementType, sharedLayout,
+                   convOutputShape, convFilterS, elementStrides,
+                   pixelBoxLowerCorner);
     }]>
   ];
 
