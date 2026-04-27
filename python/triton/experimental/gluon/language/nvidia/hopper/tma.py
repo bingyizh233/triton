@@ -95,7 +95,7 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
     _type_name: str = "tensor_descriptor_im2col"
     _mangle_prefix: str = "TDI"
     conv_output_shape: Optional[List[int]] = None
-    conv_filter_shape: Optional[List[int]] = None
+    conv_filter_s: Optional[int] = None
     element_strides: Optional[List[int]] = None
     pixel_box_lower_corner: Optional[List[int]] = None
 
@@ -112,7 +112,7 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
         value = tensor_descriptor_im2col(
             handle, shape, strides, self.block_type, layout=self.layout,
             conv_output_shape=self.conv_output_shape,
-            conv_filter_shape=self.conv_filter_shape,
+            conv_filter_s=self.conv_filter_s,
             element_strides=self.element_strides,
             pixel_box_lower_corner=self.pixel_box_lower_corner,
         )
@@ -170,16 +170,16 @@ class tensor_descriptor(_tensor_descriptor_value_base):
 class tensor_descriptor_im2col(_tensor_descriptor_value_base):
 
     def __init__(self, handle, shape: List[ttgl.tensor], strides: List[ttgl.tensor], block_type: ttgl.block_type,
-                 layout: NVMMASharedLayout, conv_output_shape=None, conv_filter_shape=None,
+                 layout: NVMMASharedLayout, conv_output_shape=None, conv_filter_s=None,
                  element_strides=None, pixel_box_lower_corner=None):
         self.conv_output_shape = conv_output_shape
-        self.conv_filter_shape = conv_filter_shape
+        self.conv_filter_s = conv_filter_s
         self.element_strides = element_strides
         self.pixel_box_lower_corner = pixel_box_lower_corner
         super().__init__(
             handle, shape, strides, block_type, layout, tensor_descriptor_im2col_type,
             conv_output_shape=conv_output_shape,
-            conv_filter_shape=conv_filter_shape,
+            conv_filter_s=conv_filter_s,
             element_strides=element_strides,
             pixel_box_lower_corner=pixel_box_lower_corner,
         )
@@ -280,15 +280,15 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
     multicast = _unwrap_if_constexpr(multicast)
 
     if (getattr(tensor_desc, "conv_output_shape", None) is not None
-            and getattr(tensor_desc, "conv_filter_shape", None) is not None):
+            and getattr(tensor_desc, "conv_filter_s", None) is not None):
         conv_output_shape = _unwrap_if_constexpr(tensor_desc.conv_output_shape)
-        conv_filter_shape = _unwrap_if_constexpr(tensor_desc.conv_filter_shape)
+        conv_filter_s = _unwrap_if_constexpr(tensor_desc.conv_filter_s)
         element_strides = _unwrap_if_constexpr(tensor_desc.element_strides)
         pixel_box_lower_corner = _unwrap_if_constexpr(tensor_desc.pixel_box_lower_corner)
         if len(coord) != 4 or len(offsets) != 2:
             raise ValueError("Conv2D im2col metadata expects 4D NHWC coord and 2D offsets")
-        if len(conv_output_shape) != 2 or len(conv_filter_shape) != 2:
-            raise ValueError("Conv2D im2col metadata expects 2D output/filter shapes")
+        if len(conv_output_shape) != 2:
+            raise ValueError("Conv2D im2col metadata expects 2D output shape")
 
         batch = ttgl.to_tensor(coord[0], _semantic=_semantic)
         in_y = ttgl.to_tensor(coord[1], _semantic=_semantic)
@@ -299,7 +299,7 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
 
         out_h = ttgl.to_tensor(conv_output_shape[0], _semantic=_semantic)
         out_w = ttgl.to_tensor(conv_output_shape[1], _semantic=_semantic)
-        filter_s = ttgl.to_tensor(conv_filter_shape[1], _semantic=_semantic)
+        filter_s = ttgl.to_tensor(conv_filter_s, _semantic=_semantic)
         c = ttgl.to_tensor(tensor_desc.shape[-1], _semantic=_semantic)
         stride_h = ttgl.to_tensor(element_strides[1], _semantic=_semantic)
         stride_w = ttgl.to_tensor(element_strides[2], _semantic=_semantic)
