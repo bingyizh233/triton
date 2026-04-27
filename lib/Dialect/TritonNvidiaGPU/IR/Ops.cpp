@@ -460,8 +460,8 @@ static bool isIm2ColDescriptor(Type descType) {
   return isa<TensorDescIm2ColType>(descType);
 }
 
-static bool hasConv2DIm2ColMetadata(TensorDescIm2ColType type) {
-  return type.getConvOutputShape() && type.getConvFilterS() &&
+static bool hasConvIm2ColMetadata(TensorDescIm2ColType type) {
+  return type.getConvOutputShape() && type.getConvFilterShape() &&
          type.getElementStrides() && type.getPixelBoxLowerCorner();
 }
 
@@ -472,11 +472,11 @@ static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
 
   if (isIm2Col) {
     auto im2colTy = cast<TensorDescIm2ColType>(desc);
-    if (hasConv2DIm2ColMetadata(im2colTy)) {
+    if (hasConvIm2ColMetadata(im2colTy)) {
       if (coords.size() != 3)
-        return op->emitOpError(
-                   "Conv2D IM2COL mode expects logical_m, logical_k, and C, "
-                   "but got ")
+        return op->emitOpError("convolution IM2COL mode expects logical_m, "
+                               "logical_k, and C, "
+                               "but got ")
                << coords.size() << " operands";
       return success();
     }
@@ -507,9 +507,10 @@ static LogicalResult verifyTMAMode(Operation *op, bool isIm2Col,
                                    TensorDescInterface desc) {
   if (isIm2Col) {
     auto im2colTy = cast<TensorDescIm2ColType>(desc);
-    if (hasConv2DIm2ColMetadata(im2colTy)) {
+    if (hasConvIm2ColMetadata(im2colTy)) {
       if (!offsets.empty())
-        return op->emitOpError("Conv2D IM2COL mode derives offsets in lowering");
+        return op->emitOpError(
+            "convolution IM2COL mode derives offsets in lowering");
       return success();
     }
     if (offsets.empty())

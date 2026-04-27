@@ -65,16 +65,10 @@ static Attribute optionalI64ArrayAttr(MLIRContext *ctx, py::object value) {
   return DenseI64ArrayAttr::get(ctx, value.cast<std::vector<int64_t>>());
 }
 
-static Attribute optionalI64Attr(MLIRContext *ctx, py::object value) {
-  if (value.is_none())
-    return Attribute();
-  return IntegerAttr::get(IntegerType::get(ctx, 64), value.cast<int64_t>());
-}
-
 // Helper to check if an MLIR type or attribute has a verifier method.
 template <typename AttrOrType>
-static constexpr auto hasVerifier(AttrOrType t)
-    -> decltype(t.verifyInvariants, true) {
+static constexpr auto hasVerifier(AttrOrType t) -> decltype(t.verifyInvariants,
+                                                            true) {
   return true;
 }
 static constexpr auto hasVerifier(...) { return false; }
@@ -620,14 +614,14 @@ void init_gluon_ir(py::module &&m) {
       .def("get_tensor_descriptor_im2col_layout_type",
            [](GluonOpBuilder &self, Type blockType, bool isSigned,
               Attribute layout, py::object convOutputShape,
-              py::object convFilterS, py::object elementStrides,
+              py::object convFilterShape, py::object elementStrides,
               py::object pixelBoxLowerCorner) -> Type {
              auto blockTy = cast<RankedTensorType>(blockType);
              auto ctx = self.getContext();
              return triton::nvidia_gpu::TensorDescIm2ColType::get(
                  blockTy.getShape(), blockTy.getElementType(), layout,
                  optionalI64ArrayAttr(ctx, convOutputShape),
-                 optionalI64Attr(ctx, convFilterS),
+                 optionalI64ArrayAttr(ctx, convFilterShape),
                  optionalI64ArrayAttr(ctx, elementStrides),
                  optionalI64ArrayAttr(ctx, pixelBoxLowerCorner), isSigned);
            })

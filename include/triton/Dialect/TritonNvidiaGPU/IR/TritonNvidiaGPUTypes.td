@@ -39,8 +39,9 @@ class TTNG_TypeDef<string name, string _mnemonic, list<Trait> traits = []>
 // TensorDescIm2ColType
 //===----------------------------------------------------------------------===//
 
-def TTNG_TensorDescIm2ColType : TTNG_TypeDef<"TensorDescIm2Col", "tensordesc_im2col",
-                                              [TT_TensorDescInterface]> {
+def TTNG_TensorDescIm2ColType
+    : TTNG_TypeDef<"TensorDescIm2Col", "tensordesc_im2col",
+                   [TT_TensorDescInterface]> {
   let summary = "Im2col tensor descriptor type for NVIDIA TMA operations";
 
   let description = [{
@@ -68,7 +69,7 @@ def TTNG_TensorDescIm2ColType : TTNG_TypeDef<"TensorDescIm2Col", "tensordesc_im2
     "Type":$elementType,
     OptionalParameter<"Attribute">:$sharedLayout,
     OptionalParameter<"Attribute">:$convOutputShape,
-    OptionalParameter<"Attribute">:$convFilterS,
+    OptionalParameter<"Attribute">:$convFilterShape,
     OptionalParameter<"Attribute">:$elementStrides,
     OptionalParameter<"Attribute">:$pixelBoxLowerCorner
   );
@@ -92,7 +93,7 @@ def TTNG_TensorDescIm2ColType : TTNG_TypeDef<"TensorDescIm2Col", "tensordesc_im2
       "Type":$elementType,
       "Attribute":$sharedLayout,
       "Attribute":$convOutputShape,
-      "Attribute":$convFilterS,
+      "Attribute":$convFilterShape,
       "Attribute":$elementStrides,
       "Attribute":$pixelBoxLowerCorner,
       "bool":$isSigned
@@ -102,7 +103,7 @@ def TTNG_TensorDescIm2ColType : TTNG_TypeDef<"TensorDescIm2Col", "tensordesc_im2
         elementType = IntegerType::get(elementType.getContext(), intTy.getWidth(), sem);
       }
       return $_get(elementType.getContext(), shape, elementType, sharedLayout,
-                   convOutputShape, convFilterS, elementStrides,
+                   convOutputShape, convFilterShape, elementStrides,
                    pixelBoxLowerCorner);
     }]>
   ];

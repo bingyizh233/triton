@@ -1136,16 +1136,16 @@ getMsgToUnpackedOffsetLayout(const LinearLayout &packedLayout,
 
 static auto getCTALocalTileOffsets(Location loc,
                                    ConversionPatternRewriter &rewriter,
-                                   const LinearLayout &msgToOffset,
-                                   Value msgId, Value ctaId) {
+                                   const LinearLayout &msgToOffset, Value msgId,
+                                   Value ctaId) {
   MLIRContext *ctx = rewriter.getContext();
-  return applyLinearLayout(loc, rewriter, msgToOffset,
-                           {{str_attr("msg"), msgId},
-                            {str_attr("block"), ctaId}});
+  return applyLinearLayout(
+      loc, rewriter, msgToOffset,
+      {{str_attr("msg"), msgId}, {str_attr("block"), ctaId}});
 }
 
-static bool hasConv2DIm2ColMetadata(ttng::TensorDescIm2ColType type) {
-  return type.getConvOutputShape() && type.getConvFilterS() &&
+static bool hasConvIm2ColMetadata(ttng::TensorDescIm2ColType type) {
+  return type.getConvOutputShape() && type.getConvFilterShape() &&
          type.getElementStrides() && type.getPixelBoxLowerCorner();
 }
 
@@ -1161,59 +1161,84 @@ static Value getTileOffsetForDim(ConversionPatternRewriter &rewriter,
   return TritonLLVMOpBuilder(rewriter.getUnknownLoc(), rewriter).i32_val(0);
 }
 
-struct Conv2DIm2ColLoweredCoords {
-  SmallVector<Value, 4> coords;
-  SmallVector<Value, 2> offsets;
+struct ConvIm2ColLoweredCoords {
+  SmallVector<Value, 5> coords;
+  SmallVector<Value, 3> offsets;
 };
 
-static int64_t getI64AttrValue(Attribute attr) {
-  return cast<IntegerAttr>(attr).getInt();
+static ArrayRef<int64_t> getI64ArrayValues(Attribute attr) {
+  return cast<DenseI64ArrayAttr>(attr).asArrayRef();
 }
 
-static int64_t getI64ArrayValue(Attribute attr, unsigned index) {
-  return cast<DenseI64ArrayAttr>(attr).asArrayRef()[index];
-}
-
-static Conv2DIm2ColLoweredCoords getConv2DIm2ColLoweredCoords(
-    Location loc, ConversionPatternRewriter &rewriter,
-    TritonLLVMOpBuilder &b, ttng::TensorDescIm2ColType descType,
-    ValueRange args, ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
+static ConvIm2ColLoweredCoords
+getConvIm2ColLoweredCoords(Location loc, ConversionPatternRewriter &rewriter,
+                           TritonLLVMOpBuilder &b,
+                           ttng::TensorDescIm2ColType descType, ValueRange args,
+                           ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
   assert(args.size() == 3 &&
-         "Conv2D im2col lowering expects logical_m, logical_k, and C");
+         "convolution im2col lowering expects logical_m, logical_k, and C");
 
-  Value logicalM = b.add(args[0], getTileOffsetForDim(rewriter, tileOffsets, 0));
-  Value logicalK = b.add(args[1], getTileOffsetForDim(rewriter, tileOffsets, 1));
+  Value logicalM =
+      b.add(args[0], getTileOffsetForDim(rewriter, tileOffsets, 0));
+  Value logicalK =
+      b.add(args[1], getTileOffsetForDim(rewriter, tileOffsets, 1));
 
-  Value p = b.i32_val(getI64ArrayValue(descType.getConvOutputShape(), 0));
-  Value q = b.i32_val(getI64ArrayValue(descType.getConvOutputShape(), 1));
+  ArrayRef<int64_t> outputShape =
+      getI64ArrayValues(descType.getConvOutputShape());
+  ArrayRef<int64_t> filterShape =
+      getI64ArrayValues(descType.getConvFilterShape());
+  ArrayRef<int64_t> elementStrides =
+      getI64ArrayValues(descType.getElementStrides());
+  ArrayRef<int64_t> lowerCorner =
+      getI64ArrayValues(descType.getPixelBoxLowerCorner());
+  int spatialRank = outputShape.size();
+
+  SmallVector<Value, 3> outputShapeVals;
+  SmallVector<Value, 3> filterShapeVals;
+  SmallVector<Value, 3> strideVals;
+  SmallVector<Value, 3> padVals;
+  outputShapeVals.reserve(spatialRank);
+  filterShapeVals.reserve(spatialRank);
+  strideVals.reserve(spatialRank);
+  padVals.reserve(spatialRank);
+  for (int i = 0; i < spatialRank; ++i) {
+    outputShapeVals.push_back(b.i32_val(outputShape[i]));
+    filterShapeVals.push_back(b.i32_val(filterShape[i]));
+    // element_strides includes N and C; spatial dimensions are in between.
+    strideVals.push_back(b.i32_val(elementStrides[i + 1]));
+    padVals.push_back(b.i32_val(-lowerCorner[i]));
+  }
+
   Value c = args[2];
-  Value s = b.i32_val(getI64AttrValue(descType.getConvFilterS()));
-  Value strideH = b.i32_val(getI64ArrayValue(descType.getElementStrides(), 1));
-  Value strideW = b.i32_val(getI64ArrayValue(descType.getElementStrides(), 2));
-  Value padH =
-      b.i32_val(-getI64ArrayValue(descType.getPixelBoxLowerCorner(), 0));
-  Value padW =
-      b.i32_val(-getI64ArrayValue(descType.getPixelBoxLowerCorner(), 1));
-  Value dilationH = b.i32_val(1);
-  Value dilationW = b.i32_val(1);
+  Value outputPixels = b.i32_val(1);
+  for (Value dim : outputShapeVals)
+    outputPixels = b.mul(outputPixels, dim);
+  Value batch = b.udiv(logicalM, outputPixels);
+  Value remM = b.urem(logicalM, outputPixels);
 
-  Value pq = b.mul(p, q);
-  Value batch = b.udiv(logicalM, pq);
-  Value remM = b.urem(logicalM, pq);
-  Value outY = b.udiv(remM, q);
-  Value outX = b.urem(remM, q);
+  SmallVector<Value, 3> outIdx(spatialRank);
+  for (int i = spatialRank - 1; i >= 0; --i) {
+    outIdx[i] = b.urem(remM, outputShapeVals[i]);
+    remM = b.udiv(remM, outputShapeVals[i]);
+  }
 
   Value channel = b.urem(logicalK, c);
-  Value rs = b.udiv(logicalK, c);
-  Value filterR = b.udiv(rs, s);
-  Value filterS = b.urem(rs, s);
+  Value filterLinear = b.udiv(logicalK, c);
+  SmallVector<Value, 3> filterIdx(spatialRank);
+  for (int i = spatialRank - 1; i >= 0; --i) {
+    filterIdx[i] = b.urem(filterLinear, filterShapeVals[i]);
+    filterLinear = b.udiv(filterLinear, filterShapeVals[i]);
+  }
 
-  Value inY = b.sub(b.mul(outY, strideH), padH);
-  Value inX = b.sub(b.mul(outX, strideW), padW);
-  Value offsetR = b.trunc(i16_ty, b.mul(filterR, dilationH));
-  Value offsetS = b.trunc(i16_ty, b.mul(filterS, dilationW));
-
-  return {{batch, inY, inX, channel}, {offsetR, offsetS}};
+  ConvIm2ColLoweredCoords lowered;
+  lowered.coords.push_back(batch);
+  for (int i = 0; i < spatialRank; ++i) {
+    lowered.coords.push_back(
+        b.sub(b.mul(outIdx[i], strideVals[i]), padVals[i]));
+    lowered.offsets.push_back(b.trunc(i16_ty, filterIdx[i]));
+  }
+  lowered.coords.push_back(channel);
+  return lowered;
 }
 
 struct AsyncTMACopyGlobalToLocalOpConversion
@@ -1264,10 +1289,16 @@ struct AsyncTMACopyGlobalToLocalOpConversion
 
     auto smemTy = op.getResult().getType();
 
-    bool isConv2DIm2Col =
+    bool isConvIm2Col =
         isIm2Col &&
-        hasConv2DIm2ColMetadata(cast<ttng::TensorDescIm2ColType>(descType));
-    int rank = isConv2DIm2Col ? 4 : op.getCoord().size();
+        hasConvIm2ColMetadata(cast<ttng::TensorDescIm2ColType>(descType));
+    int rank =
+        isConvIm2Col
+            ? getI64ArrayValues(cast<ttng::TensorDescIm2ColType>(descType)
+                                    .getConvOutputShape())
+                      .size() +
+                  2
+            : op.getCoord().size();
 
     auto msgToPackedOffset = getMsgToPackedOffsetLayout(smemTy, tmaMode);
     auto smemLayout = ttg::toLinearLayout(smemTy);
@@ -1349,8 +1380,8 @@ struct AsyncTMACopyGlobalToLocalOpConversion
           getCTALocalTileOffsets(loc, rewriter, msgToOffset, copyIdxVal, ctaId);
       SmallVector<Value> tmaCoords;
       SmallVector<Value> im2colOffsets;
-      if (isConv2DIm2Col) {
-        auto lowered = getConv2DIm2ColLoweredCoords(
+      if (isConvIm2Col) {
+        auto lowered = getConvIm2ColLoweredCoords(
             loc, rewriter, b, cast<ttng::TensorDescIm2ColType>(descType),
             adaptor.getCoord(), offsets);
         tmaCoords.append(lowered.coords.begin(), lowered.coords.end());
@@ -1369,7 +1400,7 @@ struct AsyncTMACopyGlobalToLocalOpConversion
         if (fp4Padded && i == 0) {
           coord = b.mul(coord, b.i32_val(2));
         }
-        if (!isConv2DIm2Col && i < offsets.size())
+        if (!isConvIm2Col && i < offsets.size())
           coord = b.add(coord, offsets[offsets.size() - i - 1].second);
 
         operands.push_back(ptxBuilderTMA.newOperand(coord, "r"));

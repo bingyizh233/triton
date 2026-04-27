@@ -162,7 +162,6 @@ bool init_globals() noexcept try {
   return false;
 }
 
-
 bool appendOptionalListMetadata(std::string &desc, PyObject *arg,
                                 const char *name) {
   auto attrName = from_new_ref(PyUnicode_FromString(name));
@@ -189,33 +188,6 @@ bool appendOptionalListMetadata(std::string &desc, PyObject *arg,
   desc += name;
   desc += "=";
   desc += listCStr;
-  return true;
-}
-
-
-bool appendOptionalScalarMetadata(std::string &desc, PyObject *arg,
-                                  const char *name) {
-  auto attrName = from_new_ref(PyUnicode_FromString(name));
-  if (!attrName)
-    return false;
-  int hasAttr = PyObject_HasAttr(arg, attrName.ptr());
-  if (hasAttr == 0)
-    return true;
-  auto obj = from_new_ref(PyObject_GetAttr(arg, attrName.ptr()));
-  if (!obj)
-    return false;
-  if (obj.ptr() == Py_None)
-    return true;
-  auto objStr = from_new_ref(PyObject_Str(obj.ptr()));
-  if (!objStr)
-    return false;
-  const char *objCStr = PyUnicode_AsUTF8(objStr.ptr());
-  if (!objCStr)
-    return false;
-  desc += ",";
-  desc += name;
-  desc += "=";
-  desc += objCStr;
   return true;
 }
 
@@ -296,7 +268,7 @@ std::pair<py::object, py::object> specialize_tensordesc(PyObject *arg,
     desc_cstr += std::to_string(tensor_rank);
     if (!appendOptionalListMetadata(desc_cstr, arg, "conv_output_shape"))
       return {};
-    if (!appendOptionalScalarMetadata(desc_cstr, arg, "conv_filter_s"))
+    if (!appendOptionalListMetadata(desc_cstr, arg, "conv_filter_shape"))
       return {};
     if (!appendOptionalListMetadata(desc_cstr, arg, "element_strides"))
       return {};
