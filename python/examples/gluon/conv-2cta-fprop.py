@@ -721,7 +721,6 @@ def _make_descriptors(
         element_strides=[1, stride_h, stride_w, 1],
         pixel_box_lower_corner=[-pad_h, -pad_w],
         pixel_box_upper_corner=[upper_h, upper_w],
-        conv_output_shape=[out_h, out_w],
         conv_filter_shape=[R, S],
     )
     b_desc = TensorDescriptor.from_tensor(weight_matrix, b_block, b_layout)
