@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from triton.experimental.gluon.language._core import builtin, _unwrap_if_constexpr, int32, tensor
+from triton.experimental.gluon.language._core import builtin, _unwrap_if_constexpr
 
-__all__ = ["arrive", "wait", "barrier", "cluster_cta_id"]
+__all__ = ["arrive", "wait", "barrier"]
 
 
 @builtin
@@ -36,16 +36,3 @@ def barrier(relaxed: bool = False, _semantic=None):
     """
     relaxed = _unwrap_if_constexpr(relaxed)
     _semantic.builder.create_cluster_barrier(relaxed)
-
-
-@builtin
-def cluster_cta_id(_semantic=None):
-    """
-    Return the index of this CTA within the cluster (0 .. num_ctas - 1).
-
-    For single-CTA kernels this is always 0. When ``num_ctas > 1``,
-    ``program_id`` identifies the cluster, not the CTA; use this to shard work
-    or shared memory per CTA inside the cluster.
-    """
-    handle = _semantic.builder.create_cluster_cta_id()
-    return tensor(handle, int32)

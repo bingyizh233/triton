@@ -21,7 +21,6 @@
 #include "triton/Dialect/TritonGPU/Transforms/Utility.h"
 #include "triton/Dialect/TritonNvidiaGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonNvidiaGPU/Transforms/TMAUtilities.h"
-#include "nvidia/include/Dialect/NVGPU/IR/Dialect.h"
 #include "triton/Tools/GenericSwizzling.h"
 #include "triton/Tools/LayoutUtils.h"
 #include "triton/Tools/LinearLayout.h"
@@ -33,7 +32,6 @@ namespace py = pybind11;
 namespace tt = triton;
 namespace ttg = triton::gpu;
 namespace ttng = triton::nvidia_gpu;
-namespace ttn = triton::nvgpu;
 namespace gluon = mlir::triton::gluon;
 namespace ttag = mlir::triton::amdgpu;
 
@@ -909,11 +907,6 @@ void init_gluon_ir(py::module &&m) {
           [](GluonOpBuilder &self,
              bool relaxed) { self.create<ttng::ClusterBarrierOp>(relaxed); },
           py::arg("relaxed") = false)
-      .def("create_cluster_cta_id",
-           [](GluonOpBuilder &self) -> Value {
-             auto i32Ty = self.getBuilder().getI32Type();
-             return self.create<ttn::ClusterCTAIdOp>(i32Ty);
-           })
       // CLC (Cluster Launch Control) ops - SM100+
       .def("create_clc_try_cancel",
            [](GluonOpBuilder &self, Value result, Value mbarrier) {

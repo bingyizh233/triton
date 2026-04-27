@@ -9,8 +9,8 @@ per-CTA TMA loads stream through a shared-memory ring (STAGES buffers),
 accumulation lives in a one-deep TMEM ring with ``cga_layout=((1,0),),
 two_ctas=True``, and the epilogue TMA-stores each tile in N-subtiles.
 
-Compiler gotcha (2026-04-23): calling ``cluster.cluster_cta_id()`` directly
-from this user kernel breaks Gluon's tile-level programming model and has
+Compiler gotcha (2026-04-23): materializing CTA identity directly in
+this user kernel breaks Gluon's tile-level programming model and has
 caused warp-specialization miscompiles. TMA destinations use cluster-wide
 shared-memory tiles with cga_layout; LLVM lowering derives the per-CTA
 TMA coordinates from the destination layout.
