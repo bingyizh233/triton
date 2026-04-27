@@ -1144,8 +1144,9 @@ static auto getCTALocalTileOffsets(Location loc,
                             {str_attr("block"), ctaId}});
 }
 
-static bool isConv2DIm2ColOp(Operation *op) {
-  return op->hasAttr("ttng.im2col_conv2d");
+static bool hasConv2DIm2ColMetadata(ttng::TensorDescIm2ColType type) {
+  return type.getConvOutputShape() && type.getConvFilterS() &&
+         type.getElementStrides() && type.getPixelBoxLowerCorner();
 }
 
 static Value getTileOffsetForDim(ConversionPatternRewriter &rewriter,
@@ -1263,7 +1264,9 @@ struct AsyncTMACopyGlobalToLocalOpConversion
 
     auto smemTy = op.getResult().getType();
 
-    bool isConv2DIm2Col = isIm2Col && isConv2DIm2ColOp(op);
+    bool isConv2DIm2Col =
+        isIm2Col &&
+        hasConv2DIm2ColMetadata(cast<ttng::TensorDescIm2ColType>(descType));
     int rank = isConv2DIm2Col ? 4 : op.getCoord().size();
 
     auto msgToPackedOffset = getMsgToPackedOffsetLayout(smemTy, tmaMode);

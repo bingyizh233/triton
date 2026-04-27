@@ -460,8 +460,9 @@ static bool isIm2ColDescriptor(Type descType) {
   return isa<TensorDescIm2ColType>(descType);
 }
 
-static bool isConv2DIm2ColOp(Operation *op) {
-  return op->hasAttr("ttng.im2col_conv2d");
+static bool hasConv2DIm2ColMetadata(TensorDescIm2ColType type) {
+  return type.getConvOutputShape() && type.getConvFilterS() &&
+         type.getElementStrides() && type.getPixelBoxLowerCorner();
 }
 
 static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
@@ -470,19 +471,13 @@ static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
   unsigned blockRank = desc.getShape().size();
 
   if (isIm2Col) {
-    if (isConv2DIm2ColOp(op)) {
+    auto im2colTy = cast<TensorDescIm2ColType>(desc);
+    if (hasConv2DIm2ColMetadata(im2colTy)) {
       if (coords.size() != 3)
         return op->emitOpError(
                    "Conv2D IM2COL mode expects logical_m, logical_k, and C, "
                    "but got ")
                << coords.size() << " operands";
-      auto im2colTy = cast<TensorDescIm2ColType>(desc);
-      if (!im2colTy.getConvOutputShape() || !im2colTy.getConvFilterS() ||
-          !im2colTy.getElementStrides() ||
-          !im2colTy.getPixelBoxLowerCorner())
-        return op->emitOpError(
-            "Conv2D IM2COL mode requires Conv2D metadata on the descriptor "
-            "type");
       return success();
     }
     // For IM2COL mode, coordinates are for the full tensor (3D-5D)
@@ -508,9 +503,11 @@ static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
 }
 
 static LogicalResult verifyTMAMode(Operation *op, bool isIm2Col,
-                                   ValueRange coords, ValueRange offsets) {
+                                   ValueRange coords, ValueRange offsets,
+                                   TensorDescInterface desc) {
   if (isIm2Col) {
-    if (isConv2DIm2ColOp(op)) {
+    auto im2colTy = cast<TensorDescIm2ColType>(desc);
+    if (hasConv2DIm2ColMetadata(im2colTy)) {
       if (!offsets.empty())
         return op->emitOpError("Conv2D IM2COL mode derives offsets in lowering");
       return success();
@@ -573,7 +570,8 @@ LogicalResult AsyncTMACopyGlobalToLocalOp::verify() {
   if (failed(verifyAsyncTMALoadOp(*this, descInterface, getBarrier(),
                                   getResult().getType())))
     return failure();
-  if (failed(verifyTMAMode(*this, isIm2Col, getCoord(), getOffsets())))
+  if (failed(verifyTMAMode(*this, isIm2Col, getCoord(), getOffsets(),
+                           descInterface)))
     return failure();
   if (getMulticast() && !hasCGABroadcast(resultType))
     return emitOpError(

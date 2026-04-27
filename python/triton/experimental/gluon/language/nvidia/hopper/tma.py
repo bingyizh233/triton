@@ -323,13 +323,14 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
 
         conv_args = [logical_m, logical_k, c]
         conv_args_ir = _semantic._convert_to_ir_values(conv_args, require_i64=False)
-        _semantic.builder.create_async_tma_copy_global_to_local_im2col_conv2d(
+        _semantic.builder.create_async_tma_copy_global_to_local(
             tensor_desc.handle,
             conv_args_ir,
             barrier.handle,
             result.handle,
             pred.handle,
             multicast,
+            None,
         )
         return
 

@@ -985,19 +985,6 @@ void init_gluon_ir(py::module &&m) {
             self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
                 descPtr, coord, offsetsRange, barrier, result, pred, multicast);
           })
-      .def(
-          "create_async_tma_copy_global_to_local_im2col_conv2d",
-          [](GluonOpBuilder &self, Value descPtr,
-             std::vector<Value> &convArgs, Value barrier, Value result,
-             Value pred, bool multicast) {
-            multicast &=
-                ttng::hasCGABroadcast(cast<ttg::MemDescType>(result.getType()));
-            auto op = self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
-                descPtr, convArgs, ValueRange{}, barrier, result, pred,
-                multicast);
-            op->setAttr("ttng.im2col_conv2d",
-                        UnitAttr::get(self.getContext()));
-          })
       .def("create_async_tma_copy_local_to_global",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &coord,
               Value src) {
