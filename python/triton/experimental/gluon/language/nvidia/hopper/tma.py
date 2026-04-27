@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Tuple, TYPE_CHECKING
+from typing import List, Tuple, TYPE_CHECKING, Optional
 from dataclasses import dataclass
 from triton.language.core import base_type, base_value
 import triton.experimental.gluon.language._core as ttgl
@@ -18,11 +18,9 @@ __all__ = [
     "async_atomic_xor",
     "async_copy_global_to_shared",
     "async_copy_global_to_shared_im2col",
-    "async_copy_global_to_shared_im2col_conv2d",
     "async_copy_shared_to_global",
     "async_load",
     "async_load_im2col",
-    "async_load_im2col_conv2d",
     "async_store",
     "store_wait",
     "tensor_descriptor",
@@ -30,32 +28,7 @@ __all__ = [
     "tensor_descriptor_type",
     "tensor_descriptor_im2col_type",
     "make_tensor_descriptor",
-    "Conv2DProblem",
 ]
-
-
-@dataclass(frozen=True)
-class Conv2DProblem:
-    n: int
-    h: int
-    w: int
-    c: int
-    k: int
-    r: int
-    s: int
-    p: int
-    q: int
-    stride_h: int = 1
-    stride_w: int = 1
-    pad_h: int = 0
-    pad_w: int = 0
-    dilation_h: int = 1
-    dilation_w: int = 1
-    input_layout: str = "NHWC"
-
-    def __post_init__(self):
-        if self.input_layout != "NHWC":
-            raise ValueError(f"Conv2DProblem only supports NHWC input layout, got {self.input_layout}")
 
 
 @dataclass(eq=True)
@@ -121,6 +94,10 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
     """Type for im2col tensor descriptors (convolution-friendly access patterns)."""
     _type_name: str = "tensor_descriptor_im2col"
     _mangle_prefix: str = "TDI"
+    conv_output_shape: Optional[List[int]] = None
+    conv_filter_shape: Optional[List[int]] = None
+    element_strides: Optional[List[int]] = None
+    pixel_box_lower_corner: Optional[List[int]] = None
 
     def _to_ir(self, builder: ir.builder) -> ir.type:
         is_signed = self.block_type.element_ty.is_int_signed()
@@ -132,18 +109,25 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
         cursor += 1
         shape, cursor = self.shape_type._unflatten_ir(handles, cursor)
         strides, cursor = self.strides_type._unflatten_ir(handles, cursor)
-        value = tensor_descriptor_im2col(handle, shape, strides, self.block_type, layout=self.layout)
+        value = tensor_descriptor_im2col(
+            handle, shape, strides, self.block_type, layout=self.layout,
+            conv_output_shape=self.conv_output_shape,
+            conv_filter_shape=self.conv_filter_shape,
+            element_strides=self.element_strides,
+            pixel_box_lower_corner=self.pixel_box_lower_corner,
+        )
         return value, cursor
 
 
 class _tensor_descriptor_value_base(base_value):
 
     def __init__(self, handle, shape: List[ttgl.tensor], strides: List[ttgl.tensor], block_type: ttgl.block_type,
-                 layout: NVMMASharedLayout, type_cls):
+                 layout: NVMMASharedLayout, type_cls, **type_kwargs):
         self.handle = handle
         self.shape = ttgl.tuple(shape)
         self.strides = ttgl.tuple(strides)
-        self.type = type_cls(block_type, shape_type=self.shape.type, strides_type=self.strides.type, layout=layout)
+        self.type = type_cls(block_type, shape_type=self.shape.type, strides_type=self.strides.type,
+                             layout=layout, **type_kwargs)
 
     def _set_name(self, builder: ir.builder, name: str) -> None:
         self.handle.set_loc(builder.create_name_loc(name, self.handle.get_loc()))
@@ -186,8 +170,19 @@ class tensor_descriptor(_tensor_descriptor_value_base):
 class tensor_descriptor_im2col(_tensor_descriptor_value_base):
 
     def __init__(self, handle, shape: List[ttgl.tensor], strides: List[ttgl.tensor], block_type: ttgl.block_type,
-                 layout: NVMMASharedLayout):
-        super().__init__(handle, shape, strides, block_type, layout, tensor_descriptor_im2col_type)
+                 layout: NVMMASharedLayout, conv_output_shape=None, conv_filter_shape=None,
+                 element_strides=None, pixel_box_lower_corner=None):
+        self.conv_output_shape = conv_output_shape
+        self.conv_filter_shape = conv_filter_shape
+        self.element_strides = element_strides
+        self.pixel_box_lower_corner = pixel_box_lower_corner
+        super().__init__(
+            handle, shape, strides, block_type, layout, tensor_descriptor_im2col_type,
+            conv_output_shape=conv_output_shape,
+            conv_filter_shape=conv_filter_shape,
+            element_strides=element_strides,
+            pixel_box_lower_corner=pixel_box_lower_corner,
+        )
 
 
 def _emit_alignment_check(desc, coord, fn_name: str, arg_name: str, _semantic=None):
@@ -281,9 +276,62 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
     if _semantic.builder.options.enable_iisan:
         _emit_alignment_check(tensor_desc, coord, "async_load", "innermost coordinate", _semantic=_semantic)
 
-    coord = _semantic._convert_to_ir_values(coord, require_i64=False)
     pred = _semantic.to_tensor(pred)
     multicast = _unwrap_if_constexpr(multicast)
+
+    if (getattr(tensor_desc, "conv_output_shape", None) is not None
+            and getattr(tensor_desc, "conv_filter_shape", None) is not None):
+        conv_output_shape = _unwrap_if_constexpr(tensor_desc.conv_output_shape)
+        conv_filter_shape = _unwrap_if_constexpr(tensor_desc.conv_filter_shape)
+        element_strides = _unwrap_if_constexpr(tensor_desc.element_strides)
+        pixel_box_lower_corner = _unwrap_if_constexpr(tensor_desc.pixel_box_lower_corner)
+        if len(coord) != 4 or len(offsets) != 2:
+            raise ValueError("Conv2D im2col metadata expects 4D NHWC coord and 2D offsets")
+        if len(conv_output_shape) != 2 or len(conv_filter_shape) != 2:
+            raise ValueError("Conv2D im2col metadata expects 2D output/filter shapes")
+
+        batch = ttgl.to_tensor(coord[0], _semantic=_semantic)
+        in_y = ttgl.to_tensor(coord[1], _semantic=_semantic)
+        in_x = ttgl.to_tensor(coord[2], _semantic=_semantic)
+        channel = ttgl.to_tensor(coord[3], _semantic=_semantic)
+        offset_r = ttgl.to_tensor(offsets[0], _semantic=_semantic)
+        offset_s = ttgl.to_tensor(offsets[1], _semantic=_semantic)
+
+        out_h = ttgl.to_tensor(conv_output_shape[0], _semantic=_semantic)
+        out_w = ttgl.to_tensor(conv_output_shape[1], _semantic=_semantic)
+        filter_s = ttgl.to_tensor(conv_filter_shape[1], _semantic=_semantic)
+        c = ttgl.to_tensor(tensor_desc.shape[-1], _semantic=_semantic)
+        stride_h = ttgl.to_tensor(element_strides[1], _semantic=_semantic)
+        stride_w = ttgl.to_tensor(element_strides[2], _semantic=_semantic)
+        pad_h = ttgl.to_tensor(-pixel_box_lower_corner[0], _semantic=_semantic)
+        pad_w = ttgl.to_tensor(-pixel_box_lower_corner[1], _semantic=_semantic)
+        one = ttgl.to_tensor(1, _semantic=_semantic)
+
+        out_y = in_y.__add__(pad_h, _semantic=_semantic).__floordiv__(stride_h, _semantic=_semantic)
+        out_x = in_x.__add__(pad_w, _semantic=_semantic).__floordiv__(stride_w, _semantic=_semantic)
+        out_hw = out_h.__mul__(out_w, _semantic=_semantic)
+        logical_m = batch.__mul__(out_hw, _semantic=_semantic)
+        logical_m = logical_m.__add__(out_y.__mul__(out_w, _semantic=_semantic), _semantic=_semantic)
+        logical_m = logical_m.__add__(out_x, _semantic=_semantic)
+        logical_k = offset_r.__mul__(filter_s, _semantic=_semantic).__add__(offset_s, _semantic=_semantic)
+        logical_k = logical_k.__mul__(c, _semantic=_semantic).__add__(channel, _semantic=_semantic)
+
+        conv_args = [
+            logical_m, logical_k, out_h, out_w, c, filter_s,
+            stride_h, stride_w, pad_h, pad_w, one, one,
+        ]
+        conv_args_ir = _semantic._convert_to_ir_values(conv_args, require_i64=False)
+        _semantic.builder.create_async_tma_copy_global_to_local_im2col_conv2d(
+            tensor_desc.handle,
+            conv_args_ir,
+            barrier.handle,
+            result.handle,
+            pred.handle,
+            multicast,
+        )
+        return
+
+    coord = _semantic._convert_to_ir_values(coord, require_i64=False)
     offsets_ir = _convert_im2col_offsets(offsets, _semantic)
 
     _semantic.builder.create_async_tma_copy_global_to_local(
@@ -294,51 +342,6 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
         pred.handle,
         multicast,
         offsets_ir,
-    )
-
-
-@builtin
-def async_load_im2col_conv2d(
-    tensor_desc,
-    conv_problem,
-    logical_offsets,
-    barrier,
-    result,
-    pred=True,
-    multicast=False,
-    _semantic=None,
-):
-    """Load a Conv2D activation tile through im2col using logical GEMM coordinates."""
-    conv_problem = _unwrap_if_constexpr(conv_problem)
-    if not isinstance(conv_problem, Conv2DProblem):
-        raise ValueError(f"expected Conv2DProblem, got {type(conv_problem)}")
-    if len(logical_offsets) != 2:
-        raise ValueError(f"async_load_im2col_conv2d expects [m_offset, k_offset], got {len(logical_offsets)} values")
-
-    conv_args = [
-        ttgl.to_tensor(logical_offsets[0], _semantic=_semantic),
-        ttgl.to_tensor(logical_offsets[1], _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.p, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.q, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.c, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.s, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.stride_h, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.stride_w, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.pad_h, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.pad_w, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.dilation_h, _semantic=_semantic),
-        ttgl.to_tensor(conv_problem.dilation_w, _semantic=_semantic),
-    ]
-    conv_args_ir = _semantic._convert_to_ir_values(conv_args, require_i64=False)
-    pred = _semantic.to_tensor(pred)
-    multicast = _unwrap_if_constexpr(multicast)
-    _semantic.builder.create_async_tma_copy_global_to_local_im2col_conv2d(
-        tensor_desc.handle,
-        conv_args_ir,
-        barrier.handle,
-        result.handle,
-        pred.handle,
-        multicast,
     )
 
 
@@ -361,7 +364,6 @@ def async_store(tensor_desc, coord, src, _semantic=None):
 # Backward-compatible aliases
 async_copy_global_to_shared = async_load
 async_copy_global_to_shared_im2col = async_load_im2col
-async_copy_global_to_shared_im2col_conv2d = async_load_im2col_conv2d
 async_copy_shared_to_global = async_store
 
 

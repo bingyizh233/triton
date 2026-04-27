@@ -115,6 +115,8 @@ class TensorDescriptorIm2Col:
     element_strides: Optional[List[int]] = None  # Element strides per dimension (optional)
     pixel_box_lower_corner: Optional[List[int]] = None  # Im2col: box start offsets (DHW)
     pixel_box_upper_corner: Optional[List[int]] = None  # Im2col: box end offsets (DHW)
+    conv_output_shape: Optional[List[int]] = None  # Conv2D output spatial shape (P, Q)
+    conv_filter_shape: Optional[List[int]] = None  # Conv2D filter spatial shape (R, S)
 
     def __post_init__(self):
         assert len(self.block_shape) == 2, "im2col: block_shape must be 2D"
@@ -137,6 +139,11 @@ class TensorDescriptorIm2Col:
 
         assert rank in [3, 4, 5], f"im2col mode requires rank 3, 4, or 5, got {rank}"
         spatial_rank = rank - 2
+
+        if self.conv_output_shape is not None:
+            assert len(self.conv_output_shape) == spatial_rank, "conv_output_shape length mismatch"
+        if self.conv_filter_shape is not None:
+            assert len(self.conv_filter_shape) == spatial_rank, "conv_filter_shape length mismatch"
 
         assert self.pixel_box_lower_corner is not None, "pixel_box_lower_corner required for im2col"
         assert self.pixel_box_upper_corner is not None, "pixel_box_upper_corner required for im2col"
@@ -165,12 +172,21 @@ class TensorDescriptorIm2Col:
         """Generate a type string matching MLIR types (!ttng.tensordesc or !ttng.tensordesc_im2col)."""
         dtype_str = canonicalize_dtype(self.base.dtype)
         block_shape_str = ','.join(map(str, self.block_shape))
-        return f"tensordesc_im2col<{dtype_str}[{block_shape_str}],{repr(self.layout)}>"
+        metadata = ""
+        if self.conv_output_shape is not None:
+            metadata += f",conv_output_shape={list(self.conv_output_shape)}"
+        if self.conv_filter_shape is not None:
+            metadata += f",conv_filter_shape={list(self.conv_filter_shape)}"
+        if self.element_strides is not None:
+            metadata += f",element_strides={list(self.element_strides)}"
+        if self.pixel_box_lower_corner is not None:
+            metadata += f",pixel_box_lower_corner={list(self.pixel_box_lower_corner)}"
+        return f"tensordesc_im2col<{dtype_str}[{block_shape_str}],input_rank={len(self.shape)}{metadata},{repr(self.layout)}>"
 
     @staticmethod
     def from_tensor(tensor: Any, block_shape: List[int], layout: NVMMASharedLayout, padding="zero",
                     round_f32_to_tf32=False, element_strides=None, pixel_box_lower_corner=None,
-                    pixel_box_upper_corner=None):
+                    pixel_box_upper_corner=None, conv_output_shape=None, conv_filter_shape=None):
         """
         Create a TensorDescriptorIm2Col from a tensor.
 
@@ -195,4 +211,6 @@ class TensorDescriptorIm2Col:
             element_strides,
             pixel_box_lower_corner,
             pixel_box_upper_corner,
+            conv_output_shape,
+            conv_filter_shape,
         )

@@ -387,28 +387,20 @@ def _v4_load(p):
 
             bar = p.load_ready_bars.index(state.index)
             mbarrier.expect(bar, a_desc.nbytes_per_cta + b_desc.nbytes_per_cta)
-            k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
-            tma.async_copy_global_to_shared_im2col_conv2d(
+            batch_id, out_y, out_x = prog.get_cluster_m_offsets()
+            tma.async_copy_global_to_shared_im2col(
                 a_desc,
-                tma.Conv2DProblem(
-                    n=0,
-                    h=0,
-                    w=0,
-                    c=config.Ci,
-                    k=0,
-                    r=config.R,
-                    s=config.S,
-                    p=config.out_h,
-                    q=config.out_w,
-                    stride_h=config.stride_h,
-                    stride_w=config.stride_w,
-                    pad_h=config.pad_h,
-                    pad_w=config.pad_w,
-                ),
-                [off_m, k_offset],
+                [
+                    batch_id,
+                    out_y * config.stride_h - config.pad_h,
+                    out_x * config.stride_w - config.pad_w,
+                    iter_ci * BLOCK_K,
+                ],
+                [iter_r.to(tl.int16), iter_s.to(tl.int16)],
                 bar,
                 a_stage,
             )
+            k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
             tma.async_copy_global_to_shared(b_desc, [k_offset, off_n], bar, b_stage)
             state = state.next()
         scheduler = scheduler.step(i)
@@ -703,7 +695,7 @@ def _prepare_conv2d_inputs(input_tensor, weight_tensor, stride, padding, out=Non
 
 def _make_descriptors(
     input_tensor, weight_matrix, output_matrix,
-    out_h, out_w, stride_h, stride_w, pad_h, pad_w,
+    out_h, out_w, stride_h, stride_w, pad_h, pad_w, R, S,
     block_size_m, block_size_n, block_size_k, epilogue_block_n,
     cga_layout,
 ):
@@ -729,6 +721,8 @@ def _make_descriptors(
         element_strides=[1, stride_h, stride_w, 1],
         pixel_box_lower_corner=[-pad_h, -pad_w],
         pixel_box_upper_corner=[upper_h, upper_w],
+        conv_output_shape=[out_h, out_w],
+        conv_filter_shape=[R, S],
     )
     b_desc = TensorDescriptor.from_tensor(weight_matrix, b_block, b_layout)
     c_desc = TensorDescriptor.from_tensor(output_matrix, c_block, c_layout)
@@ -798,7 +792,7 @@ def conv2d_im2col_2cta_ws_v4(
 
     a_desc, b_desc, c_desc = _make_descriptors(
         input_tensor, weight_matrix, output_matrix,
-        out_h, out_w, stride_h, stride_w, pad_h, pad_w,
+        out_h, out_w, stride_h, stride_w, pad_h, pad_w, R, S,
         block_size_m, block_size_n, block_size_k, epilogue_block_n, cga_layout,
     )
 

@@ -162,6 +162,36 @@ bool init_globals() noexcept try {
   return false;
 }
 
+
+bool appendOptionalListMetadata(std::string &desc, PyObject *arg,
+                                const char *name) {
+  auto attrName = from_new_ref(PyUnicode_FromString(name));
+  if (!attrName)
+    return false;
+  int hasAttr = PyObject_HasAttr(arg, attrName.ptr());
+  if (hasAttr == 0)
+    return true;
+  auto obj = from_new_ref(PyObject_GetAttr(arg, attrName.ptr()));
+  if (!obj)
+    return false;
+  if (obj.ptr() == Py_None)
+    return true;
+  auto listObj = from_new_ref(PySequence_List(obj.ptr()));
+  if (!listObj)
+    return false;
+  auto listStr = from_new_ref(PyObject_Str(listObj.ptr()));
+  if (!listStr)
+    return false;
+  const char *listCStr = PyUnicode_AsUTF8(listStr.ptr());
+  if (!listCStr)
+    return false;
+  desc += ",";
+  desc += name;
+  desc += "=";
+  desc += listCStr;
+  return true;
+}
+
 std::pair<py::object, py::object> specialize_tensordesc(PyObject *arg,
                                                         bool has_layout) {
   auto base = from_new_ref(PyObject_GetAttr(arg, base_attr));
@@ -237,6 +267,14 @@ std::pair<py::object, py::object> specialize_tensordesc(PyObject *arg,
       return {};
     desc_cstr += ",input_rank=";
     desc_cstr += std::to_string(tensor_rank);
+    if (!appendOptionalListMetadata(desc_cstr, arg, "conv_output_shape"))
+      return {};
+    if (!appendOptionalListMetadata(desc_cstr, arg, "conv_filter_shape"))
+      return {};
+    if (!appendOptionalListMetadata(desc_cstr, arg, "element_strides"))
+      return {};
+    if (!appendOptionalListMetadata(desc_cstr, arg, "pixel_box_lower_corner"))
+      return {};
   }
 
   if (has_layout) {
