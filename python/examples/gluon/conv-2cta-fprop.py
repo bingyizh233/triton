@@ -376,6 +376,7 @@ def _v4_load(p):
     while scheduler.has_work:
         prog = V4Program(config, scheduler.pid_m, scheduler.pid_n)
         off_m, off_n = prog.get_cluster_offsets()
+        batch_id, out_y, out_x = prog.get_cluster_m_offsets()
         for k_iter in range(num_k_iter):
             a_stage = p.a_bufs.index(state.index)
             b_stage = p.b_bufs.index(state.index)
@@ -387,7 +388,6 @@ def _v4_load(p):
 
             bar = p.load_ready_bars.index(state.index)
             mbarrier.expect(bar, a_desc.nbytes_per_cta + b_desc.nbytes_per_cta)
-            batch_id, out_y, out_x = prog.get_cluster_m_offsets()
             tma.async_copy_global_to_shared_im2col(
                 a_desc,
                 [
