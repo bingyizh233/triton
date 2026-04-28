@@ -324,6 +324,10 @@ def str_to_ty(name, c):
             if _match:
                 im2col_metadata[_name] = _ast.literal_eval(_match.group(1))
                 rest = rest[:_match.start()] + rest[_match.end():]
+        _match = _re.search(r",input_channel_dim=(-?\d+)", rest)
+        if _match:
+            im2col_metadata["input_channel_dim"] = int(_match.group(1))
+            rest = rest[:_match.start()] + rest[_match.end():]
         layout_str = rest.lstrip(",")
         is_gluon = len(layout_str)
         dtype = str_to_ty(dtype, None)

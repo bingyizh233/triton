@@ -1146,7 +1146,77 @@ static auto getCTALocalTileOffsets(Location loc,
 
 static bool hasConvIm2ColMetadata(ttng::TensorDescIm2ColType type) {
   return type.getConvOutputShape() && type.getConvFilterShape() &&
-         type.getElementStrides() && type.getPixelBoxLowerCorner();
+         type.getElementStrides() && type.getPixelBoxLowerCorner() &&
+         type.getInputChannelDim();
+}
+
+static Value getDescriptorShapeDim(ttng::AsyncTMACopyGlobalToLocalOp op,
+                                   ttng::TensorDescIm2ColType descType) {
+  auto channelDim = dyn_cast_or_null<IntegerAttr>(descType.getInputChannelDim());
+  if (!channelDim || channelDim.getInt() < 0)
+    return Value();
+
+  auto descArg = dyn_cast<BlockArgument>(op.getDesc());
+  if (!descArg)
+    return Value();
+
+  Block *block = descArg.getOwner();
+  unsigned shapeArgIndex =
+      descArg.getArgNumber() + 1 + static_cast<unsigned>(channelDim.getInt());
+  if (shapeArgIndex >= block->getNumArguments())
+    return Value();
+  return block->getArgument(shapeArgIndex);
+}
+
+static Value getBlockArgFromMul(Value value) {
+  auto mul = value.getDefiningOp<arith::MulIOp>();
+  if (!mul)
+    return Value();
+  if (isa<BlockArgument>(mul.getLhs()) && !isa<BlockArgument>(mul.getRhs()))
+    return mul.getLhs();
+  if (isa<BlockArgument>(mul.getRhs()) && !isa<BlockArgument>(mul.getLhs()))
+    return mul.getRhs();
+  return Value();
+}
+
+static Value inferInputChannelsFromLogicalK(Value logicalK) {
+  if (Value value = getBlockArgFromMul(logicalK))
+    return value;
+  auto add = logicalK.getDefiningOp<arith::AddIOp>();
+  if (!add)
+    return Value();
+  if (Value value = getBlockArgFromMul(add.getLhs()))
+    return value;
+  return getBlockArgFromMul(add.getRhs());
+}
+
+static FailureOr<Value> remapInputChannels(
+    ConversionPatternRewriter &rewriter, TritonLLVMOpBuilder &b,
+    ttng::AsyncTMACopyGlobalToLocalOp op, Value value) {
+  Value inputChannels = rewriter.getRemappedValue(value);
+  if (!inputChannels)
+    return op.emitError("failed to remap descriptor input channel metadata");
+
+  Type ty = inputChannels.getType();
+  if (ty.isInteger(32))
+    return inputChannels;
+  if (ty.isInteger(64)) {
+    Value truncated = b.trunc(i32_ty, inputChannels);
+    return truncated;
+  }
+  return op.emitError("descriptor input channel metadata must be i32 or i64");
+}
+
+static FailureOr<Value> getInputChannelsFromDescriptor(
+    ConversionPatternRewriter &rewriter, TritonLLVMOpBuilder &b,
+    ttng::AsyncTMACopyGlobalToLocalOp op,
+    ttng::TensorDescIm2ColType descType) {
+  if (Value shapeDim = getDescriptorShapeDim(op, descType))
+    return remapInputChannels(rewriter, b, op, shapeDim);
+  if (Value inferred = inferInputChannelsFromLogicalK(op.getCoord()[1]))
+    return remapInputChannels(rewriter, b, op, inferred);
+  return op.emitError(
+      "convolution im2col lowering could not find descriptor input channel metadata");
 }
 
 static Value getTileOffsetForDim(ConversionPatternRewriter &rewriter,
@@ -1178,9 +1248,6 @@ getConvIm2ColLoweredCoords(Location loc, ConversionPatternRewriter &rewriter,
                            ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
   assert(args.size() == 2 &&
          "convolution im2col lowering expects logical_m and logical_k");
-  assert(inputChannels &&
-         "convolution im2col lowering expects input channel extent");
-
   Value logicalM =
       b.add(args[0], getTileOffsetForDim(rewriter, tileOffsets, 0));
   Value logicalK =
@@ -1384,9 +1451,13 @@ struct AsyncTMACopyGlobalToLocalOpConversion
       SmallVector<Value> tmaCoords;
       SmallVector<Value> im2colOffsets;
       if (isConvIm2Col) {
+        auto inputChannels = getInputChannelsFromDescriptor(
+            rewriter, b, op, cast<ttng::TensorDescIm2ColType>(descType));
+        if (failed(inputChannels))
+          return failure();
         auto lowered = getConvIm2ColLoweredCoords(
             loc, rewriter, b, cast<ttng::TensorDescIm2ColType>(descType),
-            adaptor.getCoord(), adaptor.getInputChannels(), offsets);
+            adaptor.getCoord(), *inputChannels, offsets);
         tmaCoords.append(lowered.coords.begin(), lowered.coords.end());
         im2colOffsets.append(lowered.offsets.begin(), lowered.offsets.end());
       } else {

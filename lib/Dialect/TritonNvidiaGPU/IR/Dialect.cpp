@@ -526,6 +526,18 @@ void printI64ArrayAttr(AsmPrinter &printer, StringRef name, Attribute attr) {
   llvm::interleaveComma(arrayAttr.asArrayRef(), printer);
   printer << "]";
 }
+
+FailureOr<Attribute> parseI64Attr(AsmParser &parser) {
+  int64_t value;
+  if (failed(parser.parseInteger(value)))
+    return failure();
+  return IntegerAttr::get(IntegerType::get(parser.getContext(), 64), value);
+}
+
+void printI64Attr(AsmPrinter &printer, StringRef name, Attribute attr) {
+  if (attr)
+    printer << ", " << name << " = " << cast<IntegerAttr>(attr).getInt();
+}
 } // namespace
 
 Type TensorDescIm2ColType::parse(AsmParser &parser) {
@@ -545,6 +557,7 @@ Type TensorDescIm2ColType::parse(AsmParser &parser) {
   Attribute convFilterShape;
   Attribute elementStrides;
   Attribute pixelBoxLowerCorner;
+  Attribute inputChannelDim;
 
   auto parseMetadata = [&]() -> std::optional<ParseResult> {
     if (succeeded(parser.parseOptionalKeyword("conv_output_shape"))) {
@@ -583,6 +596,15 @@ Type TensorDescIm2ColType::parse(AsmParser &parser) {
       pixelBoxLowerCorner = *attr;
       return success();
     }
+    if (succeeded(parser.parseOptionalKeyword("input_channel_dim"))) {
+      if (failed(parser.parseEqual()))
+        return failure();
+      auto attr = parseI64Attr(parser);
+      if (failed(attr))
+        return failure();
+      inputChannelDim = *attr;
+      return success();
+    }
     return std::nullopt;
   };
 
@@ -607,7 +629,8 @@ Type TensorDescIm2ColType::parse(AsmParser &parser) {
   Location loc = parser.getEncodedSourceLoc(parser.getCurrentLocation());
   return TensorDescIm2ColType::getChecked(
       loc, parser.getContext(), shape, elementType, sharedLayout,
-      convOutputShape, convFilterShape, elementStrides, pixelBoxLowerCorner);
+      convOutputShape, convFilterShape, elementStrides, pixelBoxLowerCorner,
+      inputChannelDim);
 }
 
 void TensorDescIm2ColType::print(AsmPrinter &printer) const {
@@ -622,6 +645,7 @@ void TensorDescIm2ColType::print(AsmPrinter &printer) const {
   printI64ArrayAttr(printer, "element_strides", getElementStrides());
   printI64ArrayAttr(printer, "pixel_box_lower_corner",
                     getPixelBoxLowerCorner());
+  printI64Attr(printer, "input_channel_dim", getInputChannelDim());
   printer << ">";
 }
 
@@ -632,7 +656,7 @@ LogicalResult TensorDescIm2ColType::verify(
     function_ref<InFlightDiagnostic()> emitError, ArrayRef<int64_t> shape,
     Type elementType, Attribute sharedLayout, Attribute convOutputShape,
     Attribute convFilterShape, Attribute elementStrides,
-    Attribute pixelBoxLowerCorner) {
+    Attribute pixelBoxLowerCorner, Attribute inputChannelDim) {
   if (shape.size() != 2) {
     return emitError()
            << "TensorDescIm2ColType requires rank-2 shape, got rank "
@@ -640,7 +664,7 @@ LogicalResult TensorDescIm2ColType::verify(
   }
 
   bool hasConvMetadata = convOutputShape || convFilterShape || elementStrides ||
-                         pixelBoxLowerCorner;
+                         pixelBoxLowerCorner || inputChannelDim;
   if (!hasConvMetadata)
     return success();
   if (!convOutputShape || !convFilterShape || !elementStrides ||
@@ -648,6 +672,9 @@ LogicalResult TensorDescIm2ColType::verify(
     return emitError() << "convolution im2col metadata requires "
                           "conv_output_shape, conv_filter_shape, "
                           "element_strides, and pixel_box_lower_corner";
+  if (!inputChannelDim)
+    return emitError()
+           << "convolution im2col metadata requires input_channel_dim";
 
   auto outputShape = dyn_cast<DenseI64ArrayAttr>(convOutputShape);
   auto filterShape = dyn_cast<DenseI64ArrayAttr>(convFilterShape);
@@ -670,6 +697,14 @@ LogicalResult TensorDescIm2ColType::verify(
     return emitError()
            << "pixel_box_lower_corner must be an i64 array of length "
            << spatialRank;
+  auto channelDim = dyn_cast<IntegerAttr>(inputChannelDim);
+  if (!channelDim)
+    return emitError() << "input_channel_dim must be an integer";
+  int64_t expectedChannelDim = spatialRank + 1;
+  if (channelDim.getInt() != expectedChannelDim)
+    return emitError() << "input_channel_dim must be the channel dimension "
+                       << expectedChannelDim << " for convolution im2col, got "
+                       << channelDim.getInt();
   for (int64_t dim : outputShapeValues) {
     if (dim <= 0)
       return emitError() << "conv_output_shape values must be positive";

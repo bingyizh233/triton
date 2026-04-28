@@ -65,6 +65,12 @@ static Attribute optionalI64ArrayAttr(MLIRContext *ctx, py::object value) {
   return DenseI64ArrayAttr::get(ctx, value.cast<std::vector<int64_t>>());
 }
 
+static Attribute optionalI64Attr(MLIRContext *ctx, py::object value) {
+  if (value.is_none())
+    return Attribute();
+  return IntegerAttr::get(IntegerType::get(ctx, 64), value.cast<int64_t>());
+}
+
 // Helper to check if an MLIR type or attribute has a verifier method.
 template <typename AttrOrType>
 static constexpr auto hasVerifier(AttrOrType t) -> decltype(t.verifyInvariants,
@@ -615,7 +621,8 @@ void init_gluon_ir(py::module &&m) {
            [](GluonOpBuilder &self, Type blockType, bool isSigned,
               Attribute layout, py::object convOutputShape,
               py::object convFilterShape, py::object elementStrides,
-              py::object pixelBoxLowerCorner) -> Type {
+              py::object pixelBoxLowerCorner,
+              py::object inputChannelDim) -> Type {
              auto blockTy = cast<RankedTensorType>(blockType);
              auto ctx = self.getContext();
              return triton::nvidia_gpu::TensorDescIm2ColType::get(
@@ -623,7 +630,8 @@ void init_gluon_ir(py::module &&m) {
                  optionalI64ArrayAttr(ctx, convOutputShape),
                  optionalI64ArrayAttr(ctx, convFilterShape),
                  optionalI64ArrayAttr(ctx, elementStrides),
-                 optionalI64ArrayAttr(ctx, pixelBoxLowerCorner), isSigned);
+                 optionalI64ArrayAttr(ctx, pixelBoxLowerCorner),
+                 optionalI64Attr(ctx, inputChannelDim), isSigned);
            })
       .def("is_convert_layout_trivial",
            [](GluonOpBuilder &self, Type resultTy, Value value) -> bool {
@@ -977,21 +985,7 @@ void init_gluon_ir(py::module &&m) {
             ValueRange offsetsRange =
                 offsets.has_value() ? ValueRange(*offsets) : ValueRange{};
             self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
-                descPtr, coord, offsetsRange, Value(), barrier, result, pred,
-                multicast);
-          })
-      .def(
-          "create_async_tma_copy_global_to_local_with_input_channels",
-          [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &coord,
-             Value inputChannels, Value barrier, Value result, Value pred,
-             bool multicast, std::optional<std::vector<Value>> offsets) {
-            multicast &=
-                ttng::hasCGABroadcast(cast<ttg::MemDescType>(result.getType()));
-            ValueRange offsetsRange =
-                offsets.has_value() ? ValueRange(*offsets) : ValueRange{};
-            self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
-                descPtr, coord, offsetsRange, inputChannels, barrier, result,
-                pred, multicast);
+                descPtr, coord, offsetsRange, barrier, result, pred, multicast);
           })
       .def("create_async_tma_copy_local_to_global",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &coord,

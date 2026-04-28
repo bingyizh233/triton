@@ -117,6 +117,7 @@ class TensorDescriptorIm2Col:
     pixel_box_upper_corner: Optional[List[int]] = None  # Im2col: box end offsets (DHW)
     conv_output_shape: Optional[List[int]] = None  # Derived convolution output spatial shape
     conv_filter_shape: Optional[List[int]] = None  # Convolution filter spatial shape
+    input_channel_dim: Optional[int] = None  # Runtime C is descriptor shape[input_channel_dim]
 
     def __post_init__(self):
         assert len(self.block_shape) == 2, "im2col: block_shape must be 2D"
@@ -144,6 +145,9 @@ class TensorDescriptorIm2Col:
             assert len(self.conv_filter_shape) == spatial_rank, "conv_filter_shape length mismatch"
             for i, extent in enumerate(self.conv_filter_shape):
                 assert extent > 0, f"conv_filter_shape[{i}] must be positive"
+            if self.input_channel_dim is None:
+                self.input_channel_dim = rank - 1
+            assert self.input_channel_dim == rank - 1, "input_channel_dim must be the last input dimension"
 
         assert self.pixel_box_lower_corner is not None, "pixel_box_lower_corner required for im2col"
         assert self.pixel_box_upper_corner is not None, "pixel_box_upper_corner required for im2col"
@@ -195,6 +199,8 @@ class TensorDescriptorIm2Col:
             metadata += f",element_strides={list(self.element_strides)}"
         if self.pixel_box_lower_corner is not None:
             metadata += f",pixel_box_lower_corner={list(self.pixel_box_lower_corner)}"
+        if self.input_channel_dim is not None:
+            metadata += f",input_channel_dim={self.input_channel_dim}"
         return f"tensordesc_im2col<{dtype_str}[{block_shape_str}],input_rank={len(self.shape)}{metadata},{repr(self.layout)}>"
 
     @staticmethod
@@ -228,4 +234,5 @@ class TensorDescriptorIm2Col:
             pixel_box_upper_corner,
             None,
             conv_filter_shape,
+            None,
         )

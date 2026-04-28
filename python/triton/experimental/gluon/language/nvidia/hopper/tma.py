@@ -98,6 +98,7 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
     conv_filter_shape: Optional[List[int]] = None
     element_strides: Optional[List[int]] = None
     pixel_box_lower_corner: Optional[List[int]] = None
+    input_channel_dim: Optional[int] = None
 
     def _to_ir(self, builder: ir.builder) -> ir.type:
         is_signed = self.block_type.element_ty.is_int_signed()
@@ -109,6 +110,7 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
             self.conv_filter_shape,
             self.element_strides,
             self.pixel_box_lower_corner,
+            self.input_channel_dim,
         )
 
     def _unflatten_ir(self, handles: List[ir.value], cursor: int) -> Tuple[base_value, int]:
@@ -122,6 +124,7 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
             conv_filter_shape=self.conv_filter_shape,
             element_strides=self.element_strides,
             pixel_box_lower_corner=self.pixel_box_lower_corner,
+            input_channel_dim=self.input_channel_dim,
         )
         return value, cursor
 
@@ -178,13 +181,14 @@ class tensor_descriptor_im2col(_tensor_descriptor_value_base):
 
     def __init__(self, handle, shape: List[ttgl.tensor], strides: List[ttgl.tensor], block_type: ttgl.block_type,
                  layout: NVMMASharedLayout, conv_output_shape=None, conv_filter_shape=None,
-                 element_strides=None, pixel_box_lower_corner=None):
+                 element_strides=None, pixel_box_lower_corner=None, input_channel_dim=None):
         super().__init__(
             handle, shape, strides, block_type, layout, tensor_descriptor_im2col_type,
             conv_output_shape=conv_output_shape,
             conv_filter_shape=conv_filter_shape,
             element_strides=element_strides,
             pixel_box_lower_corner=pixel_box_lower_corner,
+            input_channel_dim=input_channel_dim,
         )
 
 
@@ -326,11 +330,9 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
 
         conv_args = [logical_m, logical_k]
         conv_args_ir = _semantic._convert_to_ir_values(conv_args, require_i64=False)
-        input_channels_ir = _semantic._convert_to_ir_values([c], require_i64=False)[0]
-        _semantic.builder.create_async_tma_copy_global_to_local_with_input_channels(
+        _semantic.builder.create_async_tma_copy_global_to_local(
             tensor_desc.handle,
             conv_args_ir,
-            input_channels_ir,
             barrier.handle,
             result.handle,
             pred.handle,

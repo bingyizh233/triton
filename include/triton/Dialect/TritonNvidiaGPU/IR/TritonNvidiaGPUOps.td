@@ -441,7 +441,6 @@ def TTNG_AsyncTMACopyGlobalToLocalOp : TTNG_Op<"async_tma_copy_global_to_local",
     Arg<TT_AnyTensorDescType, "", [MemRead<GlobalMemory>]>:$desc,
     Variadic<I32>:$coord,
     Variadic<I16>:$offsets,
-    Optional<I32>:$inputChannels,
     Arg<TTG_MemDescType, "", [MemWrite<SharedMemory>]>:$barrier,
     Arg<TTG_MemDescType, "", [MemWrite<SharedMemory>]>:$result,
     I1:$pred,
@@ -463,13 +462,12 @@ def TTNG_AsyncTMACopyGlobalToLocalOp : TTNG_Op<"async_tma_copy_global_to_local",
                                    ::mlir::cast<::mlir::triton::gpu::MemDescType>(
                                        result.getType()));
       build($_builder, $_state, desc, coord, /*offsets=*/ValueRange{},
-            /*inputChannels=*/Value(), barrier, result, pred, multicast, cache,
-            evict, isVolatile);
+            barrier, result, pred, multicast, cache, evict, isVolatile);
     }]>
   ];
 
   let assemblyFormat = [{
-    $desc `[` $coord `]` (`input_channels` `=` $inputChannels^)? (`offsets` `=` `[` $offsets^ `]`)? $result `,` $barrier `,` $pred
+    $desc `[` $coord `]` (`offsets` `=` `[` $offsets^ `]`)? $result `,` $barrier `,` $pred
     oilist(`cacheModifier` `=` $cache | `evictionPolicy` `=` $evict)
     attr-dict `:` qualified(type($desc)) `,` qualified(type($barrier)) `->` qualified(type($result))
   }];

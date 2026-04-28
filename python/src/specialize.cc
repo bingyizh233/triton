@@ -191,6 +191,32 @@ bool appendOptionalListMetadata(std::string &desc, PyObject *arg,
   return true;
 }
 
+bool appendOptionalIntMetadata(std::string &desc, PyObject *arg,
+                               const char *name) {
+  auto attrName = from_new_ref(PyUnicode_FromString(name));
+  if (!attrName)
+    return false;
+  int hasAttr = PyObject_HasAttr(arg, attrName.ptr());
+  if (hasAttr == 0)
+    return true;
+  auto obj = from_new_ref(PyObject_GetAttr(arg, attrName.ptr()));
+  if (!obj)
+    return false;
+  if (obj.ptr() == Py_None)
+    return true;
+  auto objStr = from_new_ref(PyObject_Str(obj.ptr()));
+  if (!objStr)
+    return false;
+  const char *objCStr = PyUnicode_AsUTF8(objStr.ptr());
+  if (!objCStr)
+    return false;
+  desc += ",";
+  desc += name;
+  desc += "=";
+  desc += objCStr;
+  return true;
+}
+
 std::pair<py::object, py::object> specialize_tensordesc(PyObject *arg,
                                                         bool has_layout) {
   auto base = from_new_ref(PyObject_GetAttr(arg, base_attr));
@@ -273,6 +299,8 @@ std::pair<py::object, py::object> specialize_tensordesc(PyObject *arg,
     if (!appendOptionalListMetadata(desc_cstr, arg, "element_strides"))
       return {};
     if (!appendOptionalListMetadata(desc_cstr, arg, "pixel_box_lower_corner"))
+      return {};
+    if (!appendOptionalIntMetadata(desc_cstr, arg, "input_channel_dim"))
       return {};
   }
 
