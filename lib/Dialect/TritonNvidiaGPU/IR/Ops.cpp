@@ -473,9 +473,9 @@ static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
   if (isIm2Col) {
     auto im2colTy = cast<TensorDescIm2ColType>(desc);
     if (hasConvIm2ColMetadata(im2colTy)) {
-      if (coords.size() != 3)
+      if (coords.size() != 2)
         return op->emitOpError("convolution IM2COL mode expects logical_m, "
-                               "logical_k, and C, "
+                               "logical_k, "
                                "but got ")
                << coords.size() << " operands";
       return success();
@@ -574,6 +574,18 @@ LogicalResult AsyncTMACopyGlobalToLocalOp::verify() {
   if (failed(verifyTMAMode(*this, isIm2Col, getCoord(), getOffsets(),
                            descInterface)))
     return failure();
+  if (isIm2Col) {
+    auto im2colTy = cast<TensorDescIm2ColType>(descInterface);
+    bool hasConvMetadata = hasConvIm2ColMetadata(im2colTy);
+    if (hasConvMetadata && !getInputChannels())
+      return emitOpError(
+          "convolution IM2COL mode requires input_channels runtime metadata");
+    if (!hasConvMetadata && getInputChannels())
+      return emitOpError(
+          "input_channels is only valid for convolution IM2COL mode");
+  } else if (getInputChannels()) {
+    return emitOpError("TILED mode does not support input_channels");
+  }
   if (getMulticast() && !hasCGABroadcast(resultType))
     return emitOpError(
         "multicast requires the shared layout to broadcast across CTAs");

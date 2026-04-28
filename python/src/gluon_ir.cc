@@ -977,7 +977,21 @@ void init_gluon_ir(py::module &&m) {
             ValueRange offsetsRange =
                 offsets.has_value() ? ValueRange(*offsets) : ValueRange{};
             self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
-                descPtr, coord, offsetsRange, barrier, result, pred, multicast);
+                descPtr, coord, offsetsRange, Value(), barrier, result, pred,
+                multicast);
+          })
+      .def(
+          "create_async_tma_copy_global_to_local_with_input_channels",
+          [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &coord,
+             Value inputChannels, Value barrier, Value result, Value pred,
+             bool multicast, std::optional<std::vector<Value>> offsets) {
+            multicast &=
+                ttng::hasCGABroadcast(cast<ttg::MemDescType>(result.getType()));
+            ValueRange offsetsRange =
+                offsets.has_value() ? ValueRange(*offsets) : ValueRange{};
+            self.create<ttng::AsyncTMACopyGlobalToLocalOp>(
+                descPtr, coord, offsetsRange, inputChannels, barrier, result,
+                pred, multicast);
           })
       .def("create_async_tma_copy_local_to_global",
            [](GluonOpBuilder &self, Value descPtr, std::vector<Value> &coord,

@@ -1174,9 +1174,12 @@ static ConvIm2ColLoweredCoords
 getConvIm2ColLoweredCoords(Location loc, ConversionPatternRewriter &rewriter,
                            TritonLLVMOpBuilder &b,
                            ttng::TensorDescIm2ColType descType, ValueRange args,
+                           Value inputChannels,
                            ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
-  assert(args.size() == 3 &&
-         "convolution im2col lowering expects logical_m, logical_k, and C");
+  assert(args.size() == 2 &&
+         "convolution im2col lowering expects logical_m and logical_k");
+  assert(inputChannels &&
+         "convolution im2col lowering expects input channel extent");
 
   Value logicalM =
       b.add(args[0], getTileOffsetForDim(rewriter, tileOffsets, 0));
@@ -1209,7 +1212,7 @@ getConvIm2ColLoweredCoords(Location loc, ConversionPatternRewriter &rewriter,
     padVals.push_back(b.i32_val(-lowerCorner[i]));
   }
 
-  Value c = args[2];
+  Value c = inputChannels;
   Value outputPixels = b.i32_val(1);
   for (Value dim : outputShapeVals)
     outputPixels = b.mul(outputPixels, dim);
@@ -1383,7 +1386,7 @@ struct AsyncTMACopyGlobalToLocalOpConversion
       if (isConvIm2Col) {
         auto lowered = getConvIm2ColLoweredCoords(
             loc, rewriter, b, cast<ttng::TensorDescIm2ColType>(descType),
-            adaptor.getCoord(), offsets);
+            adaptor.getCoord(), adaptor.getInputChannels(), offsets);
         tmaCoords.append(lowered.coords.begin(), lowered.coords.end());
         im2colOffsets.append(lowered.offsets.begin(), lowered.offsets.end());
       } else {

@@ -324,11 +324,13 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
             logical_k = logical_k.__add__(spatial_offsets[i], _semantic=_semantic)
         logical_k = logical_k.__mul__(c, _semantic=_semantic).__add__(channel, _semantic=_semantic)
 
-        conv_args = [logical_m, logical_k, c]
+        conv_args = [logical_m, logical_k]
         conv_args_ir = _semantic._convert_to_ir_values(conv_args, require_i64=False)
-        _semantic.builder.create_async_tma_copy_global_to_local(
+        input_channels_ir = _semantic._convert_to_ir_values([c], require_i64=False)[0]
+        _semantic.builder.create_async_tma_copy_global_to_local_with_input_channels(
             tensor_desc.handle,
             conv_args_ir,
+            input_channels_ir,
             barrier.handle,
             result.handle,
             pred.handle,
