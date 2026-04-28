@@ -43,7 +43,6 @@ import pytest
 import torch
 
 import triton
-import triton.language as tl
 
 from triton.language.core import _aggregate as aggregate
 
@@ -250,13 +249,6 @@ class V4Program:
     def get_cluster_offsets(self):
         return self.pid_m * self.config.TILE_M, self.pid_n * self.config.TILE_N
 
-    @gluon.jit
-    def get_cluster_m_offsets(self):
-        off_m, _ = self.get_cluster_offsets()
-        out_x = off_m % self.config.out_w
-        out_y = (off_m // self.config.out_w) % self.config.out_h
-        batch_id = (off_m // self.config.out_w) // self.config.out_h
-        return batch_id, out_y, out_x
 
 
 @aggregate
@@ -376,7 +368,6 @@ def _v4_load(p):
     while scheduler.has_work:
         prog = V4Program(config, scheduler.pid_m, scheduler.pid_n)
         off_m, off_n = prog.get_cluster_offsets()
-        batch_id, out_y, out_x = prog.get_cluster_m_offsets()
         for k_iter in range(num_k_iter):
             a_stage = p.a_bufs.index(state.index)
             b_stage = p.b_bufs.index(state.index)
