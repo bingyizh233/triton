@@ -68,11 +68,10 @@ def TTNG_TensorDescIm2ColType
     ArrayRefParameter<"int64_t">:$shape,
     "Type":$elementType,
     OptionalParameter<"Attribute">:$sharedLayout,
-    OptionalParameter<"Attribute">:$convOutputShape,
     OptionalParameter<"Attribute">:$convFilterShape,
     OptionalParameter<"Attribute">:$elementStrides,
     OptionalParameter<"Attribute">:$pixelBoxLowerCorner,
-    OptionalParameter<"Attribute">:$inputChannelDim
+    OptionalParameter<"Attribute">:$pixelBoxUpperCorner
   );
 
   let builders = [
@@ -87,17 +86,16 @@ def TTNG_TensorDescIm2ColType
         elementType = IntegerType::get(elementType.getContext(), intTy.getWidth(), sem);
       }
       return $_get(elementType.getContext(), shape, elementType, sharedLayout,
-                   Attribute(), Attribute(), Attribute(), Attribute(), Attribute());
+                   Attribute(), Attribute(), Attribute(), Attribute());
     }]>,
     TypeBuilderWithInferredContext<(ins
       "llvm::ArrayRef<int64_t>":$shape,
       "Type":$elementType,
       "Attribute":$sharedLayout,
-      "Attribute":$convOutputShape,
       "Attribute":$convFilterShape,
       "Attribute":$elementStrides,
       "Attribute":$pixelBoxLowerCorner,
-      "Attribute":$inputChannelDim,
+      "Attribute":$pixelBoxUpperCorner,
       "bool":$isSigned
     ), [{
       if (auto intTy = llvm::dyn_cast<IntegerType>(elementType)) {
@@ -105,8 +103,8 @@ def TTNG_TensorDescIm2ColType
         elementType = IntegerType::get(elementType.getContext(), intTy.getWidth(), sem);
       }
       return $_get(elementType.getContext(), shape, elementType, sharedLayout,
-                   convOutputShape, convFilterShape, elementStrides,
-                   pixelBoxLowerCorner, inputChannelDim);
+                   convFilterShape, elementStrides, pixelBoxLowerCorner,
+                   pixelBoxUpperCorner);
     }]>
   ];
 

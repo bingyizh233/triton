@@ -193,18 +193,20 @@ module attributes {"ttg.num-ctas" = 1 : i32, "ttg.num-warps" = 8 : i32, ttg.targ
   }
 
   // CHECK-LABEL: @tma_load_im2col_conv_metadata_compact
-  // CHECK-SAME: !ttng.tensordesc_im2col<256x128xbf16, {{.*}}conv_output_shape = [64, 64], conv_filter_shape = [3, 3], element_strides = [1, 1, 1, 1], pixel_box_lower_corner = [-1, -1], input_channel_dim = 3{{.*}}>
-  // CHECK: ttng.async_tma_copy_global_to_local {{.*}}[{{.*}}, {{.*}}] %{{.*}}, %{{.*}}, {{.*}} : !ttng.tensordesc_im2col<256x128xbf16, {{.*}}input_channel_dim = 3{{.*}}>
+  // CHECK-SAME: !ttng.tensordesc_im2col<256x128xbf16, {{.*}}conv_filter_shape = [3, 3], element_strides = [1, 1, 1, 1], pixel_box_lower_corner = [-1, -1], pixel_box_upper_corner = [-1, -1]{{.*}}>
+  // CHECK-NOT: conv_output_shape
+  // CHECK-NOT: input_channel_dim
+  // CHECK: ttng.async_tma_copy_global_to_local {{.*}}[{{.*}}, {{.*}}] %{{.*}}, %{{.*}}, {{.*}} : !ttng.tensordesc_im2col<256x128xbf16, {{.*}}pixel_box_upper_corner = [-1, -1]{{.*}}>
   // CHECK-NOT: conv_filter_s
   // CHECK-NOT: input_channels
-  tt.func public @tma_load_im2col_conv_metadata_compact(%desc: !ttng.tensordesc_im2col<256x128xbf16, #nvmma_128, conv_output_shape = [64, 64], conv_filter_shape = [3, 3], element_strides = [1, 1, 1, 1], pixel_box_lower_corner = [-1, -1], input_channel_dim = 3>) {
+  tt.func public @tma_load_im2col_conv_metadata_compact(%desc: !ttng.tensordesc_im2col<256x128xbf16, #nvmma_128, conv_filter_shape = [3, 3], element_strides = [1, 1, 1, 1], pixel_box_lower_corner = [-1, -1], pixel_box_upper_corner = [-1, -1]>) {
     %true = arith.constant true
     %m = arith.constant 0 : i32
     %k = arith.constant 0 : i32
     %buf = ttg.local_alloc : () -> !ttg.memdesc<256x128xbf16, #nvmma_128, #smem, mutable>
     %bar = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared3, #smem, mutable>
     ttng.init_barrier %bar, 1 : !ttg.memdesc<1xi64, #shared3, #smem, mutable>
-    ttng.async_tma_copy_global_to_local %desc[%m, %k] %buf, %bar, %true : !ttng.tensordesc_im2col<256x128xbf16, #nvmma_128, conv_output_shape = [64, 64], conv_filter_shape = [3, 3], element_strides = [1, 1, 1, 1], pixel_box_lower_corner = [-1, -1], input_channel_dim = 3>, !ttg.memdesc<1xi64, #shared3, #smem, mutable> -> !ttg.memdesc<256x128xbf16, #nvmma_128, #smem, mutable>
+    ttng.async_tma_copy_global_to_local %desc[%m, %k] %buf, %bar, %true : !ttng.tensordesc_im2col<256x128xbf16, #nvmma_128, conv_filter_shape = [3, 3], element_strides = [1, 1, 1, 1], pixel_box_lower_corner = [-1, -1], pixel_box_upper_corner = [-1, -1]>, !ttg.memdesc<1xi64, #shared3, #smem, mutable> -> !ttg.memdesc<256x128xbf16, #nvmma_128, #smem, mutable>
     tt.return
   }
 }

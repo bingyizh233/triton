@@ -292,15 +292,13 @@ std::pair<py::object, py::object> specialize_tensordesc(PyObject *arg,
       return {};
     desc_cstr += ",input_rank=";
     desc_cstr += std::to_string(tensor_rank);
-    if (!appendOptionalListMetadata(desc_cstr, arg, "conv_output_shape"))
-      return {};
     if (!appendOptionalListMetadata(desc_cstr, arg, "conv_filter_shape"))
       return {};
     if (!appendOptionalListMetadata(desc_cstr, arg, "element_strides"))
       return {};
     if (!appendOptionalListMetadata(desc_cstr, arg, "pixel_box_lower_corner"))
       return {};
-    if (!appendOptionalIntMetadata(desc_cstr, arg, "input_channel_dim"))
+    if (!appendOptionalListMetadata(desc_cstr, arg, "pixel_box_upper_corner"))
       return {};
   }
 

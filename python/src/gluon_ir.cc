@@ -619,19 +619,17 @@ void init_gluon_ir(py::module &&m) {
            })
       .def("get_tensor_descriptor_im2col_layout_type",
            [](GluonOpBuilder &self, Type blockType, bool isSigned,
-              Attribute layout, py::object convOutputShape,
-              py::object convFilterShape, py::object elementStrides,
-              py::object pixelBoxLowerCorner,
-              py::object inputChannelDim) -> Type {
+              Attribute layout, py::object convFilterShape,
+              py::object elementStrides, py::object pixelBoxLowerCorner,
+              py::object pixelBoxUpperCorner) -> Type {
              auto blockTy = cast<RankedTensorType>(blockType);
              auto ctx = self.getContext();
              return triton::nvidia_gpu::TensorDescIm2ColType::get(
                  blockTy.getShape(), blockTy.getElementType(), layout,
-                 optionalI64ArrayAttr(ctx, convOutputShape),
                  optionalI64ArrayAttr(ctx, convFilterShape),
                  optionalI64ArrayAttr(ctx, elementStrides),
                  optionalI64ArrayAttr(ctx, pixelBoxLowerCorner),
-                 optionalI64Attr(ctx, inputChannelDim), isSigned);
+                 optionalI64ArrayAttr(ctx, pixelBoxUpperCorner), isSigned);
            })
       .def("is_convert_layout_trivial",
            [](GluonOpBuilder &self, Type resultTy, Value value) -> bool {

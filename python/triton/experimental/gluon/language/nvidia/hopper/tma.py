@@ -94,11 +94,10 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
     """Type for im2col tensor descriptors (convolution-friendly access patterns)."""
     _type_name: str = "tensor_descriptor_im2col"
     _mangle_prefix: str = "TDI"
-    conv_output_shape: Optional[List[int]] = None
     conv_filter_shape: Optional[List[int]] = None
     element_strides: Optional[List[int]] = None
     pixel_box_lower_corner: Optional[List[int]] = None
-    input_channel_dim: Optional[int] = None
+    pixel_box_upper_corner: Optional[List[int]] = None
 
     def _to_ir(self, builder: ir.builder) -> ir.type:
         is_signed = self.block_type.element_ty.is_int_signed()
@@ -106,11 +105,10 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
             self.block_type.to_ir(builder),
             is_signed,
             self.layout._to_ir(builder),
-            self.conv_output_shape,
             self.conv_filter_shape,
             self.element_strides,
             self.pixel_box_lower_corner,
-            self.input_channel_dim,
+            self.pixel_box_upper_corner,
         )
 
     def _unflatten_ir(self, handles: List[ir.value], cursor: int) -> Tuple[base_value, int]:
@@ -120,11 +118,10 @@ class tensor_descriptor_im2col_type(_tensor_descriptor_type_base):
         strides, cursor = self.strides_type._unflatten_ir(handles, cursor)
         value = tensor_descriptor_im2col(
             handle, shape, strides, self.block_type, layout=self.layout,
-            conv_output_shape=self.conv_output_shape,
             conv_filter_shape=self.conv_filter_shape,
             element_strides=self.element_strides,
             pixel_box_lower_corner=self.pixel_box_lower_corner,
-            input_channel_dim=self.input_channel_dim,
+            pixel_box_upper_corner=self.pixel_box_upper_corner,
         )
         return value, cursor
 
@@ -180,15 +177,14 @@ class tensor_descriptor(_tensor_descriptor_value_base):
 class tensor_descriptor_im2col(_tensor_descriptor_value_base):
 
     def __init__(self, handle, shape: List[ttgl.tensor], strides: List[ttgl.tensor], block_type: ttgl.block_type,
-                 layout: NVMMASharedLayout, conv_output_shape=None, conv_filter_shape=None,
-                 element_strides=None, pixel_box_lower_corner=None, input_channel_dim=None):
+                 layout: NVMMASharedLayout, conv_filter_shape=None,
+                 element_strides=None, pixel_box_lower_corner=None, pixel_box_upper_corner=None):
         super().__init__(
             handle, shape, strides, block_type, layout, tensor_descriptor_im2col_type,
-            conv_output_shape=conv_output_shape,
             conv_filter_shape=conv_filter_shape,
             element_strides=element_strides,
             pixel_box_lower_corner=pixel_box_lower_corner,
-            input_channel_dim=input_channel_dim,
+            pixel_box_upper_corner=pixel_box_upper_corner,
         )
 
 
@@ -287,33 +283,38 @@ def async_load_im2col(tensor_desc, coord, offsets, barrier, result, pred=True, m
     multicast = _unwrap_if_constexpr(multicast)
 
     desc_type = tensor_desc.type
-    if (getattr(desc_type, "conv_output_shape", None) is not None
-            and getattr(desc_type, "conv_filter_shape", None) is not None):
-        conv_output_shape = _unwrap_if_constexpr(desc_type.conv_output_shape)
+    if getattr(desc_type, "conv_filter_shape", None) is not None:
         conv_filter_shape = _unwrap_if_constexpr(desc_type.conv_filter_shape)
         element_strides = _unwrap_if_constexpr(desc_type.element_strides)
         pixel_box_lower_corner = _unwrap_if_constexpr(desc_type.pixel_box_lower_corner)
-        spatial_rank = len(conv_output_shape)
+        pixel_box_upper_corner = _unwrap_if_constexpr(desc_type.pixel_box_upper_corner)
+        spatial_rank = len(conv_filter_shape)
         if spatial_rank < 1 or spatial_rank > 3:
-            raise ValueError("convolution im2col metadata expects 1D, 2D, or 3D output shape")
-        if len(conv_filter_shape) != spatial_rank:
-            raise ValueError("convolution im2col metadata expects filter rank to match output rank")
+            raise ValueError("convolution im2col metadata expects 1D, 2D, or 3D filter shape")
         if len(coord) != spatial_rank + 2 or len(offsets) != spatial_rank:
             raise ValueError(
                 "convolution im2col metadata expects rank+2 input coordinates and rank offsets")
-        if len(element_strides) != spatial_rank + 2 or len(pixel_box_lower_corner) != spatial_rank:
-            raise ValueError("convolution im2col metadata has inconsistent stride or padding rank")
+        if (len(element_strides) != spatial_rank + 2 or len(pixel_box_lower_corner) != spatial_rank
+                or len(pixel_box_upper_corner) != spatial_rank):
+            raise ValueError("convolution im2col metadata has inconsistent stride or pixel-box rank")
 
         batch = ttgl.to_tensor(coord[0], _semantic=_semantic)
         spatial_coords = [ttgl.to_tensor(coord[i + 1], _semantic=_semantic) for i in range(spatial_rank)]
         channel = ttgl.to_tensor(coord[spatial_rank + 1], _semantic=_semantic)
         spatial_offsets = [ttgl.to_tensor(offsets[i], _semantic=_semantic) for i in range(spatial_rank)]
 
-        out_shape = [ttgl.to_tensor(conv_output_shape[i], _semantic=_semantic) for i in range(spatial_rank)]
         filter_shape = [ttgl.to_tensor(conv_filter_shape[i], _semantic=_semantic) for i in range(spatial_rank)]
         c = ttgl.to_tensor(tensor_desc.shape[-1], _semantic=_semantic)
         stride_vals = [ttgl.to_tensor(element_strides[i + 1], _semantic=_semantic) for i in range(spatial_rank)]
         pad_vals = [ttgl.to_tensor(-pixel_box_lower_corner[i], _semantic=_semantic) for i in range(spatial_rank)]
+        out_shape = []
+        for i in range(spatial_rank):
+            input_dim = ttgl.to_tensor(tensor_desc.shape[i + 1], _semantic=_semantic)
+            numerator = input_dim.__add__(
+                ttgl.to_tensor(pixel_box_upper_corner[i] - 1 - pixel_box_lower_corner[i], _semantic=_semantic),
+                _semantic=_semantic)
+            out_shape.append(numerator.__floordiv__(stride_vals[i], _semantic=_semantic).__add__(
+                ttgl.to_tensor(1, _semantic=_semantic), _semantic=_semantic))
 
         logical_m = batch
         for i in range(spatial_rank):

@@ -461,9 +461,8 @@ static bool isIm2ColDescriptor(Type descType) {
 }
 
 static bool hasConvIm2ColMetadata(TensorDescIm2ColType type) {
-  return type.getConvOutputShape() && type.getConvFilterShape() &&
-         type.getElementStrides() && type.getPixelBoxLowerCorner() &&
-         type.getInputChannelDim();
+  return type.getConvFilterShape() && type.getElementStrides() &&
+         type.getPixelBoxLowerCorner() && type.getPixelBoxUpperCorner();
 }
 
 static LogicalResult verifyAsyncTMACoords(Operation *op, ValueRange coords,
