@@ -65,12 +65,6 @@ static Attribute optionalI64ArrayAttr(MLIRContext *ctx, py::object value) {
   return DenseI64ArrayAttr::get(ctx, value.cast<std::vector<int64_t>>());
 }
 
-static Attribute optionalI64Attr(MLIRContext *ctx, py::object value) {
-  if (value.is_none())
-    return Attribute();
-  return IntegerAttr::get(IntegerType::get(ctx, 64), value.cast<int64_t>());
-}
-
 // Helper to check if an MLIR type or attribute has a verifier method.
 template <typename AttrOrType>
 static constexpr auto hasVerifier(AttrOrType t) -> decltype(t.verifyInvariants,

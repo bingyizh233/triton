@@ -1189,28 +1189,6 @@ static Value getDescriptorShapeDim(ttng::AsyncTMACopyGlobalToLocalOp op,
   return shapeArgs[shapeIndex];
 }
 
-static Value getBlockArgFromMul(Value value) {
-  auto mul = value.getDefiningOp<arith::MulIOp>();
-  if (!mul)
-    return Value();
-  if (isa<BlockArgument>(mul.getLhs()) && !isa<BlockArgument>(mul.getRhs()))
-    return mul.getLhs();
-  if (isa<BlockArgument>(mul.getRhs()) && !isa<BlockArgument>(mul.getLhs()))
-    return mul.getRhs();
-  return Value();
-}
-
-static Value inferInputChannelsFromLogicalK(Value logicalK) {
-  if (Value value = getBlockArgFromMul(logicalK))
-    return value;
-  auto add = logicalK.getDefiningOp<arith::AddIOp>();
-  if (!add)
-    return Value();
-  if (Value value = getBlockArgFromMul(add.getLhs()))
-    return value;
-  return getBlockArgFromMul(add.getRhs());
-}
-
 static FailureOr<Value> remapI32Metadata(
     ConversionPatternRewriter &rewriter, TritonLLVMOpBuilder &b,
     ttng::AsyncTMACopyGlobalToLocalOp op, Value value, StringRef name) {
@@ -1228,41 +1206,19 @@ static FailureOr<Value> remapI32Metadata(
   return op.emitError("descriptor ") << name << " metadata must be i32 or i64";
 }
 
-static FailureOr<Value> getInputChannelsFromDescriptor(
+static FailureOr<Value> getInputChannelFromDescriptor(
     ConversionPatternRewriter &rewriter, TritonLLVMOpBuilder &b,
     ttng::AsyncTMACopyGlobalToLocalOp op, int spatialRank) {
   if (Value shapeDim = getDescriptorShapeDim(op, spatialRank + 1, spatialRank))
     return remapI32Metadata(rewriter, b, op, shapeDim, "input channel");
-  if (Value inferred = inferInputChannelsFromLogicalK(op.getCoord()[1]))
-    return remapI32Metadata(rewriter, b, op, inferred, "input channel");
   return op.emitError(
       "convolution im2col lowering could not find descriptor input channel metadata");
-}
-
-static SmallVector<Value, 3> inferOutputShapeFromLogicalM(Value logicalM,
-                                                          int spatialRank) {
-  SmallVector<Value, 3> reversed;
-  Value cur = logicalM;
-  for (int i = spatialRank - 1; i >= 0; --i) {
-    auto add = cur.getDefiningOp<arith::AddIOp>();
-    if (!add)
-      return {};
-    auto mul = add.getLhs().getDefiningOp<arith::MulIOp>();
-    if (!mul) {
-      mul = add.getRhs().getDefiningOp<arith::MulIOp>();
-      if (!mul)
-        return {};
-    }
-    reversed.push_back(mul.getRhs());
-    cur = mul.getLhs();
-  }
-  return SmallVector<Value, 3>(reversed.rbegin(), reversed.rend());
 }
 
 static FailureOr<SmallVector<Value, 3>> getOutputShapeFromDescriptor(
     ConversionPatternRewriter &rewriter, TritonLLVMOpBuilder &b,
     ttng::AsyncTMACopyGlobalToLocalOp op,
-    ttng::TensorDescIm2ColType descType, Value logicalM) {
+    ttng::TensorDescIm2ColType descType) {
   ArrayRef<int64_t> filterShape = getI64ArrayValues(descType.getConvFilterShape());
   ArrayRef<int64_t> elementStrides = getI64ArrayValues(descType.getElementStrides());
   ArrayRef<int64_t> lowerCorner = getI64ArrayValues(descType.getPixelBoxLowerCorner());
@@ -1271,13 +1227,11 @@ static FailureOr<SmallVector<Value, 3>> getOutputShapeFromDescriptor(
 
   SmallVector<Value, 3> outputShapeVals;
   outputShapeVals.reserve(spatialRank);
-  bool haveDescriptorShape = true;
   for (int i = 0; i < spatialRank; ++i) {
     Value inputDimSource = getDescriptorShapeDim(op, i + 1, spatialRank);
-    if (!inputDimSource) {
-      haveDescriptorShape = false;
-      break;
-    }
+    if (!inputDimSource)
+      return op.emitError(
+          "convolution im2col lowering could not find descriptor input spatial metadata");
     auto inputDim = remapI32Metadata(rewriter, b, op, inputDimSource,
                                      "input spatial shape");
     if (failed(inputDim))
@@ -1287,22 +1241,6 @@ static FailureOr<SmallVector<Value, 3>> getOutputShapeFromDescriptor(
     outputShapeVals.push_back(
         b.add(b.udiv(numerator, b.i32_val(elementStrides[i + 1])),
               b.i32_val(1)));
-  }
-  if (haveDescriptorShape)
-    return outputShapeVals;
-
-  SmallVector<Value, 3> inferred = inferOutputShapeFromLogicalM(logicalM,
-                                                                spatialRank);
-  if (inferred.size() != static_cast<size_t>(spatialRank))
-    return op.emitError(
-        "convolution im2col lowering could not derive output shape metadata");
-
-  outputShapeVals.clear();
-  for (Value value : inferred) {
-    auto remapped = remapI32Metadata(rewriter, b, op, value, "output shape");
-    if (failed(remapped))
-      return failure();
-    outputShapeVals.push_back(*remapped);
   }
   return outputShapeVals;
 }
@@ -1328,7 +1266,7 @@ static ConvIm2ColLoweredCoords
 getConvIm2ColLoweredCoords(Location loc, ConversionPatternRewriter &rewriter,
                            TritonLLVMOpBuilder &b,
                            ttng::TensorDescIm2ColType descType, ValueRange args,
-                           Value inputChannels,
+                           Value inputChannel,
                            ArrayRef<Value> outputShapeVals,
                            ArrayRef<std::pair<StringAttr, Value>> tileOffsets) {
   assert(args.size() == 2 &&
@@ -1359,7 +1297,7 @@ getConvIm2ColLoweredCoords(Location loc, ConversionPatternRewriter &rewriter,
     padVals.push_back(b.i32_val(-lowerCorner[i]));
   }
 
-  Value c = inputChannels;
+  Value c = inputChannel;
   Value outputPixels = b.i32_val(1);
   for (Value dim : outputShapeVals)
     outputPixels = b.mul(outputPixels, dim);
@@ -1533,17 +1471,17 @@ struct AsyncTMACopyGlobalToLocalOpConversion
       if (isConvIm2Col) {
         auto im2colDescType = cast<ttng::TensorDescIm2ColType>(descType);
         int spatialRank = getI64ArrayValues(im2colDescType.getConvFilterShape()).size();
-        auto inputChannels = getInputChannelsFromDescriptor(
+        auto inputChannel = getInputChannelFromDescriptor(
             rewriter, b, op, spatialRank);
-        if (failed(inputChannels))
+        if (failed(inputChannel))
           return failure();
         auto outputShape = getOutputShapeFromDescriptor(
-            rewriter, b, op, im2colDescType, op.getCoord()[0]);
+            rewriter, b, op, im2colDescType);
         if (failed(outputShape))
           return failure();
         auto lowered = getConvIm2ColLoweredCoords(
             loc, rewriter, b, im2colDescType, adaptor.getCoord(),
-            *inputChannels, *outputShape, offsets);
+            *inputChannel, *outputShape, offsets);
         tmaCoords.append(lowered.coords.begin(), lowered.coords.end());
         im2colOffsets.append(lowered.offsets.begin(), lowered.offsets.end());
       } else {
