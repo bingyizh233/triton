@@ -163,6 +163,42 @@ class TensorDescriptorIm2Col:
         assert is_power_of_2(self.block_shape[0]), f"block_shape[0] must be power of 2, got {self.block_shape[0]}"
         assert is_power_of_2(self.block_shape[1]), f"block_shape[1] must be power of 2, got {self.block_shape[1]}"
 
+    def logical_matrix_shape(self):
+        """Return the logical im2col matrix shape as ``(M, K)``.
+
+        This is available for metadata-backed convolution im2col descriptors.
+        The logical M dimension is the product of batch and output spatial
+        extents. The logical K dimension is the product of filter spatial
+        extents and the input channel dimension.
+        """
+        if self.conv_filter_shape is None:
+            raise ValueError("logical_matrix_shape requires conv_filter_shape metadata")
+        if self.element_strides is None:
+            raise ValueError("logical_matrix_shape requires element_strides metadata")
+
+        spatial_rank = len(self.shape) - 2
+        if spatial_rank <= 0:
+            raise ValueError("im2col descriptor shape must be [N, spatial..., C]")
+        if len(self.conv_filter_shape) != spatial_rank:
+            raise ValueError("conv_filter_shape rank does not match descriptor shape")
+        if len(self.element_strides) != spatial_rank + 2:
+            raise ValueError("element_strides rank does not match descriptor shape")
+
+        batch = int(self.shape[0])
+        channels = int(self.shape[-1])
+        m = batch
+        for i in range(spatial_rank):
+            input_dim = int(self.shape[i + 1])
+            stride = int(self.element_strides[i + 1])
+            lower = int(self.pixel_box_lower_corner[i])
+            upper = int(self.pixel_box_upper_corner[i])
+            m *= (upper + input_dim - 1 - lower) // stride + 1
+
+        k = channels
+        for extent in self.conv_filter_shape:
+            k *= int(extent)
+        return m, k
+
     @property
     def mode(self) -> str:
         return "im2col"

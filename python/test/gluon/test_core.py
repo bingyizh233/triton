@@ -220,6 +220,50 @@ def test_tma_im2col(pixels_per_column, channels_per_pixel, swizzle_byte_width):
     torch.testing.assert_close(out, inp.reshape(pixels_per_column, channels_per_pixel), atol=0, rtol=0)
 
 
+@pytest.mark.skipif(not is_hopper_or_newer(), reason="Requires Hopper")
+def test_tma_im2col_logical_matrix_shape():
+    inp = torch.empty((2, 16, 17, 32), device="cuda", dtype=torch.float32)
+    block_shape = [32, 32]
+    layout = ttgl.NVMMASharedLayout(
+        swizzle_byte_width=32,
+        element_bitwidth=32,
+        rank=2,
+        transposed=False,
+        fp4_padded=False,
+    )
+    stride_h, stride_w = 2, 1
+    pad_h, pad_w = 1, 2
+    r, s = 3, 5
+    out_h = (inp.shape[1] + 2 * pad_h - r) // stride_h + 1
+    out_w = (inp.shape[2] + 2 * pad_w - s) // stride_w + 1
+    upper_h = (out_h - 1) * stride_h + 1 - inp.shape[1] - pad_h
+    upper_w = (out_w - 1) * stride_w + 1 - inp.shape[2] - pad_w
+
+    desc = gluon.nvidia.hopper.TensorDescriptorIm2Col.from_tensor(
+        inp,
+        block_shape,
+        layout,
+        padding="zero",
+        element_strides=[1, stride_h, stride_w, 1],
+        pixel_box_lower_corner=[-pad_h, -pad_w],
+        pixel_box_upper_corner=[upper_h, upper_w],
+        conv_filter_shape=[r, s],
+    )
+    assert desc.logical_matrix_shape() == (inp.shape[0] * out_h * out_w, r * s * inp.shape[-1])
+
+    raw_desc = gluon.nvidia.hopper.TensorDescriptorIm2Col.from_tensor(
+        inp,
+        block_shape,
+        layout,
+        padding="zero",
+        element_strides=[1, stride_h, stride_w, 1],
+        pixel_box_lower_corner=[-pad_h, -pad_w],
+        pixel_box_upper_corner=[upper_h, upper_w],
+    )
+    with pytest.raises(ValueError, match="conv_filter_shape"):
+        raw_desc.logical_matrix_shape()
+
+
 @gluon.jit
 def tma_round_f32_to_tf32_kernel(in_desc, out_desc):
     smem = ttgl.allocate_shared_memory(in_desc.dtype, in_desc.block_shape, in_desc.layout)

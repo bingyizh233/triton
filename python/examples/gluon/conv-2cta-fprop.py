@@ -767,24 +767,29 @@ def conv2d_im2col_2cta_ws_v4(
     (input_tensor, weight_tensor, output, N, H, W, Ci, Co, R, S,
      out_h, out_w, stride_h, stride_w, pad_h, pad_w) = prep
 
-    M_GEMM = N * out_h * out_w
     num_ctas = 2 ** len(cga_layout)
     tile_m = block_size_m * get_split_dim(cga_layout, 0)
     tile_n = block_size_n
-    if M_GEMM % tile_m != 0:
-        raise NotImplementedError(
-            f"V4 requires M_GEMM to be a multiple of {tile_m}; got {M_GEMM}."
-        )
 
     # B is stored as (K, N) for cluster MMA -- no in-kernel permute needed.
     weight_matrix = weight_tensor.reshape(Co, R * S * Ci).transpose(0, 1).contiguous()
-    output_matrix = output.view(M_GEMM, Co)
+    output_matrix = output.view(-1, Co)
 
     a_desc, b_desc, c_desc = _make_descriptors(
         input_tensor, weight_matrix, output_matrix,
         out_h, out_w, stride_h, stride_w, pad_h, pad_w, R, S,
         block_size_m, block_size_n, block_size_k, epilogue_block_n, cga_layout,
     )
+    M_GEMM, K_GEMM = a_desc.logical_matrix_shape()
+    if M_GEMM % tile_m != 0:
+        raise NotImplementedError(
+            f"V4 requires logical M to be a multiple of {tile_m}; got {M_GEMM}."
+        )
+    if output_matrix.shape[0] != M_GEMM or weight_matrix.shape[0] != K_GEMM:
+        raise ValueError(
+            f"Descriptor logical matrix shape {(M_GEMM, K_GEMM)} does not match "
+            f"output/weight matrices {(output_matrix.shape[0], weight_matrix.shape[0])}."
+        )
 
     def grid(_meta):
         num_tiles = triton.cdiv(M_GEMM, tile_m) * triton.cdiv(Co, tile_n)
