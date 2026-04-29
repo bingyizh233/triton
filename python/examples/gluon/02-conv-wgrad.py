@@ -177,14 +177,9 @@ class WgradProgram:
         return self.ci_block * self.config.BLOCK_N
 
     @gluon.jit
-    def get_spatial_offsets(self, local_k):
+    def get_spatial_offset(self, local_k):
         m_global = (self.k_start + local_k) * self.config.BLOCK_K
-        spatial_per_batch = self.config.out_h * self.config.out_w
-        m_in_batch = m_global % spatial_per_batch
-        batch = m_global // spatial_per_batch
-        out_x = m_in_batch % self.config.out_w
-        out_y = m_in_batch // self.config.out_w
-        return m_global, batch, out_y, out_x
+        return m_global
 
     @gluon.jit
     def get_weight_k_offset(self):
@@ -230,10 +225,9 @@ def load_partition(p):
     for idx in range(scheduler.get_num_tiles()):
         prog = config.get_program(scheduler.get_tile_id(idx))
         co_offset = prog.get_co_offset()
-        ci_offset = prog.get_ci_offset()
 
         for local_k in range(prog.k_iters_this_split):
-            m_global, batch, out_y, out_x = prog.get_spatial_offsets(local_k)
+            m_global = prog.get_spatial_offset(local_k)
             ready_bar = ready_bars.index(state.index)
             mbarrier.wait(empty_bars.index(state.index), state.phase)
             mbarrier.expect(ready_bar, p.grad_out_desc.block_type.nbytes + p.in_desc.block_type.nbytes)
@@ -249,13 +243,7 @@ def load_partition(p):
             # B = im2col(input): [N, H, W, Ci], block [BLOCK_K, BLOCK_N]
             tma.async_load_im2col(
                 p.in_desc,
-                [
-                    batch,
-                    out_y * config.stride_h - config.pad_h,
-                    out_x * config.stride_w - config.pad_w,
-                    ci_offset,
-                ],
-                [prog.iter_r.to(tl.int16), prog.iter_s.to(tl.int16)],
+                [m_global, prog.get_weight_k_offset()],
                 ready_bar,
                 p.b_bufs.index(state.index),
             )
@@ -519,7 +507,7 @@ def _allocate_wgrad_output(device, Co, K_GEMM):
     return torch.zeros((Co, K_GEMM), device=device, dtype=torch.float32)
 
 
-def _make_wgrad_descriptors(input_nhwc, grad_output_nhwc, Co, out_h, out_w, stride_h, stride_w, pad_h, pad_w,
+def _make_wgrad_descriptors(input_nhwc, grad_output_nhwc, Co, R, S, out_h, out_w, stride_h, stride_w, pad_h, pad_w,
                             input_block_shape, grad_out_block_shape):
     """Create TMA descriptors for wgrad im2col and grad_output."""
     # TMA im2col descriptor for the activation tensor [N, H, W, Ci] in NHWC.
@@ -538,6 +526,7 @@ def _make_wgrad_descriptors(input_nhwc, grad_output_nhwc, Co, out_h, out_w, stri
         element_strides=[1, stride_h, stride_w, 1],
         pixel_box_lower_corner=[-pad_h, -pad_w],
         pixel_box_upper_corner=[upper_h, upper_w],
+        conv_filter_shape=[R, S],
     )
 
     # TMA tiled descriptor for grad_output reshaped as (M_spatial, Co).
@@ -651,6 +640,8 @@ def _make_wgrad_runner(
         input_nhwc,
         grad_output_nhwc,
         Co,
+        R,
+        S,
         out_h,
         out_w,
         stride_h,

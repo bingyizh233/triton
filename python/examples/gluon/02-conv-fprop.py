@@ -6,7 +6,6 @@ import pytest
 import torch
 
 import triton
-import triton.language as tl
 
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
@@ -131,16 +130,6 @@ class ConvProgram:
     pid_m: gl.tensor
     pid_n: gl.tensor
 
-    @gluon.jit
-    def get_m_offsets(self):
-        """Decompose M-tile offset into (batch, out_y, out_x)."""
-        offs_m = self.pid_m * self.config.BLOCK_M
-        config = self.config
-        out_x = offs_m % config.out_w
-        out_y = (offs_m // config.out_w) % config.out_h
-        batch_id = (offs_m // config.out_w) // config.out_h
-        return batch_id, out_y, out_x
-
 
 # ===-----------------------------------------------------------------------===#
 # Partition Arguments
@@ -183,7 +172,6 @@ def load_partition(p):
     scheduler = PersistentTileScheduler.initialize(config.get_num_tiles())
     for idx in range(scheduler.get_num_tiles()):
         prog = config.get_program(scheduler.get_tile_id(idx))
-        batch_id, out_y, out_x = prog.get_m_offsets()
 
         for k_iter in range(num_k_iter):
             iter_ci = k_iter // num_rs
@@ -195,20 +183,14 @@ def load_partition(p):
             mbarrier.wait(empty_bars.index(state.index), state.phase)
             mbarrier.expect(ready_bar, p.in_desc.block_type.nbytes + p.weight_desc.block_type.nbytes)
 
+            k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
             tma.async_load_im2col(
                 p.in_desc,
-                [
-                    batch_id,
-                    out_y * config.stride_h - config.pad_h,
-                    out_x * config.stride_w - config.pad_w,
-                    iter_ci * BLOCK_K,
-                ],
-                [iter_r.to(tl.int16), iter_s.to(tl.int16)],
+                [prog.pid_m * config.BLOCK_M, k_offset],
                 ready_bar,
                 p.a_bufs.index(state.index),
             )
 
-            k_offset = (iter_r * config.S + iter_s) * config.Ci + iter_ci * BLOCK_K
             tma.async_load(
                 p.weight_desc,
                 [prog.pid_n * config.BLOCK_N, k_offset],
@@ -511,6 +493,7 @@ def _make_conv_fprop_descriptors(input_tensor, weight_tensor, out_h, out_w, stri
         element_strides=[1, stride_h, stride_w, 1],
         pixel_box_lower_corner=[-pad_h, -pad_w],
         pixel_box_upper_corner=[upper_h, upper_w],
+        conv_filter_shape=list(weight_tensor.shape[1:3]),
     )
 
     # TMA tiled descriptor for weight: (Co, R*S*Ci) = (N_GEMM, K_GEMM)

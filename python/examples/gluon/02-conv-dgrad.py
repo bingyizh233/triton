@@ -172,15 +172,6 @@ class DgradProgram:
     k_iters_this_split: gl.tensor
 
     @gluon.jit
-    def get_m_offsets(self):
-        offs_m = self.pid_m * self.config.BLOCK_M
-        config = self.config
-        out_x = offs_m % config.W_sub
-        out_y = (offs_m // config.W_sub) % config.H_sub
-        batch_id = (offs_m // config.W_sub) // config.H_sub
-        return batch_id, out_y, out_x
-
-    @gluon.jit
     def get_ci_offset(self):
         return self.pid_n * self.config.BLOCK_N
 
@@ -237,7 +228,6 @@ def load_partition(p):
 
     for idx in range(scheduler.get_num_tiles()):
         prog = config.get_program(scheduler.get_tile_id(idx))
-        batch_id, out_y, out_x = prog.get_m_offsets()
         ci_offset = prog.get_ci_offset()
 
         for local_k in range(prog.k_iters_this_split):
@@ -246,15 +236,10 @@ def load_partition(p):
             mbarrier.wait(empty_bars.index(state.index), state.phase)
             mbarrier.expect(ready_bar, p.grad_y_desc.block_type.nbytes + p.weight_desc.block_type.nbytes)
 
+            logical_k = (iter_r * config.S_eff + iter_s) * config.Co + iter_co * BLOCK_K
             tma.async_load_im2col(
                 p.grad_y_desc,
-                [
-                    batch_id,
-                    out_y - config.pad_h,
-                    out_x - config.pad_w,
-                    iter_co * BLOCK_K,
-                ],
-                [iter_r.to(tl.int16), iter_s.to(tl.int16)],
+                [prog.pid_m * config.BLOCK_M, logical_k],
                 ready_bar,
                 p.a_bufs.index(state.index),
             )
@@ -613,7 +598,8 @@ def _make_dgrad_weight_descriptor(W_rot_flat, weight_block_shape):
     return weight_desc
 
 
-def _make_dgrad_grad_y_descriptor(grad_output_nhwc, H_sub, W_sub, out_h, out_w, offset_a, offset_b, input_block_shape):
+def _make_dgrad_grad_y_descriptor(grad_output_nhwc, H_sub, W_sub, out_h, out_w, R_eff, S_eff, offset_a, offset_b,
+                                  input_block_shape):
     lower_h = offset_a
     lower_w = offset_b
     upper_h = H_sub + offset_a - out_h
@@ -630,6 +616,7 @@ def _make_dgrad_grad_y_descriptor(grad_output_nhwc, H_sub, W_sub, out_h, out_w, 
         element_strides=[1, 1, 1, 1],
         pixel_box_lower_corner=[lower_h, lower_w],
         pixel_box_upper_corner=[upper_h, upper_w],
+        conv_filter_shape=[R_eff, S_eff],
     )
 
 
@@ -822,6 +809,8 @@ def _launch_dgrad_subproblems(
             W_sub,
             out_h,
             out_w,
+            R_eff_val,
+            S_eff_val,
             offset_a,
             offset_b,
             input_block_shape,
