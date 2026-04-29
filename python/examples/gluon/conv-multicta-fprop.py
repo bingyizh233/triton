@@ -154,12 +154,6 @@ class MultiCTAConfig:
     Co: gl.tensor
     R: gl.tensor
     S: gl.tensor
-    out_h: gl.tensor
-    out_w: gl.tensor
-    stride_h: gl.tensor
-    stride_w: gl.tensor
-    pad_h: gl.tensor
-    pad_w: gl.tensor
     Ci: gl.tensor
     M_GEMM: gl.tensor
 
@@ -460,13 +454,11 @@ def _multicta_clc(p):
 
 
 @gluon.jit(do_not_specialize=[
-    "N", "H", "W", "R", "S", "pad_h", "pad_w",
+    "M_GEMM", "R", "S",
 ])
 def _conv2d_im2col_multicta_ws_kernel(
     a_desc, b_desc, c_desc,
-    N, H, W, Ci, Co, R, S,
-    out_h, out_w,
-    stride_h, stride_w, pad_h, pad_w,
+    M_GEMM, Ci, Co, R, S,
     GROUP_SIZE_M: gl.constexpr,
     STAGES: gl.constexpr,
     ACC_STAGES: gl.constexpr,
@@ -489,14 +481,9 @@ def _conv2d_im2col_multicta_ws_kernel(
     gl.static_assert(TILE_M_C == TILE_M)
     gl.static_assert(TILE_N % EPILOGUE_BLOCK_N == 0)
 
-    M_GEMM = N * out_h * out_w
-
     config = MultiCTAConfig(
         gl.to_tensor(Co), gl.to_tensor(R), gl.to_tensor(S),
-        gl.to_tensor(out_h), gl.to_tensor(out_w),
-        gl.to_tensor(stride_h), gl.to_tensor(stride_w),
-        gl.to_tensor(pad_h), gl.to_tensor(pad_w),
-        gl.to_tensor(Ci), M_GEMM,
+        gl.to_tensor(Ci), gl.to_tensor(M_GEMM),
         TILE_M, TILE_N, CTA_M, BLOCK_K, GROUP_SIZE_M,
     )
     # Cluster-aware SMEM layouts: A is M-split across CTAs, B is N-split.
@@ -736,9 +723,7 @@ def conv2d_im2col_multicta_ws(
 
     _conv2d_im2col_multicta_ws_kernel[grid](
         a_desc, b_desc, c_desc,
-        N, H, W, Ci, Co, R, S,
-        out_h, out_w,
-        stride_h, stride_w, pad_h, pad_w,
+        M_GEMM, Ci, Co, R, S,
         GROUP_SIZE_M=group_size_m,
         STAGES=stages,
         ACC_STAGES=acc_stages,
