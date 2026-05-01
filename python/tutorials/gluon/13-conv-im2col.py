@@ -9,9 +9,10 @@ We cover:
 1) TMA im2col fundamentals on a 4-D NHWC tensor
 2) How TensorDescriptorIm2Col parameters control access boundaries
 3) Practical loading patterns (basic, padded, shifted-offset, multi-batch)
-4) How 2D convolution works (the sliding window)
-5) The im2col algorithm that reshapes convolution into GEMM
-6) A convolution kernel using TMA im2col + MMA (works on both Hopper and Blackwell)
+4) The logical [M, K] im2col view for convolution descriptors
+5) How 2D convolution works (the sliding window)
+6) The im2col algorithm that reshapes convolution into GEMM
+7) A convolution kernel using TMA im2col + MMA (works on both Hopper and Blackwell)
 
 We re-use the MMA abstraction from ``07-persistence.py`` so that the same kernel
 runs on Hopper (WGMMA) and Blackwell (tcgen05 MMA) without code duplication.
@@ -57,6 +58,16 @@ async_copy_global_to_shared_im2col:
     - offsets: [h_offset, w_offset] spatial offsets (i16)
 
     Starting position (the first pixel): (batch_idx, start_h + h_offset, start_w + w_offset, channel_start)
+
+Logical im2col view:
+    If TensorDescriptorIm2Col is built with conv_filter_shape metadata, Gluon
+    also accepts logical GEMM coordinates:
+
+        async_copy_global_to_shared_im2col(tensor_desc, [logical_m, logical_k], barrier, result)
+
+    The descriptor owns stride, padding, pixel-box, and filter shape metadata.
+    The compiler lowers logical_m/logical_k into the physical tensor and filter
+    coordinates. This is the recommended model for convolution kernels.
 """
 
 import importlib
@@ -850,6 +861,68 @@ if __name__ == "__main__":
 # ```
 
 # %%
+# Logical TMA im2col View
+# -----------------------
+#
+# The examples above use the raw hardware im2col form:
+#
+# .. code-block:: python
+#
+#     tma.async_load_im2col(desc, [batch, h, w, c], [r, s], bar, smem)
+#
+# That is useful for understanding the hardware addressing rule, but
+# convolution kernels are easier to write in the logical GEMM view:
+#
+# .. code-block:: python
+#
+#     tma.async_load_im2col(desc, [logical_m, logical_k], bar, smem)
+#
+# In this mode, the descriptor carries ``conv_filter_shape`` plus the stride and
+# pixel-box metadata. The compiler maps:
+#
+# .. code-block:: text
+#
+#     logical_m -> n, out_y, out_x
+#     logical_k -> r, s, c
+#
+# For forward convolution:
+#
+# .. code-block:: text
+#
+#     M = N * out_h * out_w
+#     K = R * S * Ci
+#     logical_k = (r * S + s) * Ci + c
+#
+# The descriptor can also report the logical matrix shape for host-side grid
+# construction:
+#
+# .. code-block:: python
+#
+#     a_desc = TensorDescriptorIm2Col.from_tensor(
+#         input_nhwc,
+#         [BLOCK_M, BLOCK_K],
+#         input_layout,
+#         padding="zero",
+#         element_strides=[1, stride, stride, 1],
+#         pixel_box_lower_corner=[-padding, -padding],
+#         pixel_box_upper_corner=[upper_h, upper_w],
+#         conv_filter_shape=[R, S],
+#     )
+#     M_GEMM, K_GEMM = a_desc.logical_matrix_shape()
+#
+# The logical TMA copy in a convolution K-loop then looks like:
+#
+# .. code-block:: python
+#
+#     k_offset = (r * S + s) * Ci + ci_block * BLOCK_K
+#     tma.async_load_im2col(a_desc, [m_offset, k_offset], bar, a_smem)
+#
+# This is the programming model used by the production Gluon convolution
+# examples in ``python/examples/gluon/02-conv-fprop.py``,
+# ``python/examples/gluon/02-conv-dgrad.py``, and
+# ``python/examples/gluon/02-conv-wgrad.py``.
+
+# %%
 # Implicit GEMM with TMA im2col
 # ------------------------------
 #
@@ -857,15 +930,11 @@ if __name__ == "__main__":
 # simple but wastes memory because overlapping patches duplicate input data.
 # For an R x S filter, each input element may be copied up to R * S times!
 #
-# **Implicit GEMM** avoids materializing A. During the GEMM K-loop, it computes
-# input addresses on the fly for each filter position ``(r, s)`` and channel
-# block. On Hopper+ GPUs, TMA provides a dedicated **im2col mode** that performs
-# this address generation in hardware. We configure one
-# ``TensorDescriptorIm2Col`` (see the launcher), and each TMA load receives a
-# filter offset ``[r, s]`` that selects which kernel position to gather. TMA
-# then handles output-position strides, zero-padding for out-of-bounds
-# accesses, and batch-boundary wrapping automatically, with no register-level
-# index arithmetic.
+# **Implicit GEMM** avoids materializing A. During the GEMM K-loop, the kernel
+# issues TMA im2col loads instead of building the whole im2col matrix in memory.
+# With the logical-view API, each load receives ``[logical_m, logical_k]`` and
+# lowering derives the output pixel, filter position, channel block, padding
+# checks, and batch-boundary wrapping automatically.
 #
 # Pseudocode:
 #
@@ -882,9 +951,9 @@ if __name__ == "__main__":
 #         for r in range(R):                  # filter height
 #             for s in range(S):              # filter width
 #                 for ci_block in range(Ci // BLOCK_K):
-#                     # Input tile via TMA im2col:
-#                     # input[batch, out_y*stride+r-pad, out_x*stride+s-pad, ci_block*BLOCK_K:...]
-#                     tma.async_load_im2col(...)
+#                     k_offset = (r * S + s) * Ci + ci_block * BLOCK_K
+#                     # Input tile via logical-view TMA im2col:
+#                     tma.async_load_im2col(in_desc, [m_offset, k_offset], bar, a_smem)
 #                     A_tile = a_smem         # [BLOCK_M, BLOCK_K]
 #
 #                     # Weight tile via standard TMA:
@@ -899,14 +968,18 @@ if __name__ == "__main__":
 #         tma.async_copy_shared_to_global(...)
 # ```
 #
-# Key insight: we never materialize the full im2col matrix; address generation
-# happens inside the K-loop via TMA im2col.
+# Key insight: we never materialize the full im2col matrix, but the kernel is
+# written as if the im2col matrix A really existed.
 #
 # %%
 # Gluon Kernel
 # ------------
 #
-# The kernel below implements a single-buffered implicit GEMM convolution.
+# The compact kernel below implements a single-buffered implicit GEMM
+# convolution using the raw im2col form from the first half of the tutorial.
+# The logical-view form just introduced is the cleaner model used by the
+# production examples.
+#
 # ``store_output_tile`` is factored out as a helper; everything else is
 # inline so the reader can follow the im2col algorithm top-to-bottom.
 #
@@ -997,12 +1070,8 @@ def conv2d_im2col_kernel(
         ci_block, rs_idx = k_iter % ci_num_blocks, k_iter // ci_num_blocks
         r, s = rs_idx // S, rs_idx % S
 
-        # A = load_input[batch, oh*stride+r-pad, ow*stride+s-pad, ci_blk*BLOCK_K:…]
-        # Equivalent TMA-im2col mapping:
-        #   coord   = [batch_id, out_y*stride_h-pad_h, out_x*stride_w-pad_w, ci_block*BLOCK_K]
-        #   offsets = [r, s]
-        # TMA applies offsets to the spatial coords, so start is:
-        #   [batch_id, out_y*stride_h-pad_h+r, out_x*stride_w-pad_w+s, ci_block*BLOCK_K]
+        # A = load_input[batch, oh*stride+r-pad, ow*stride+s-pad, ci_blk*BLOCK_K:...]
+        # The raw im2col form takes physical starting coords plus filter offsets.
         mbarrier.expect(tma_bar, in_desc.block_type.nbytes + weight_desc.block_type.nbytes)
         tma.async_load_im2col(
             in_desc,
@@ -1037,9 +1106,9 @@ def conv2d_im2col_kernel(
 # ------------------
 #
 # The host side sets up TMA descriptors and launches the kernel.
-# The critical part is configuring the ``TensorDescriptorIm2Col`` with the
-# correct ``pixel_box``, ``element_strides``, and ``padding`` to match
-# the convolution parameters.
+# For the raw im2col form used below, the critical part is configuring the
+# ``TensorDescriptorIm2Col`` with the correct ``pixel_box``,
+# ``element_strides``, and ``padding`` to match the convolution parameters.
 #
 # ``t7.select_mma_impl()`` automatically picks the right MMA backend:
 # ``WGMMA`` on Hopper (SM 9.x) or ``MMAv5`` on Blackwell (SM 10.x).
