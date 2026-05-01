@@ -1102,6 +1102,79 @@ def conv2d_im2col_kernel(
 
 
 # %%
+# Logical-View Kernel Variant
+# ---------------------------
+#
+# The raw kernel above decomposes ``M`` into ``batch/out_y/out_x`` and passes
+# physical coordinates plus ``[r, s]`` offsets to TMA. With the logical-view
+# API, the kernel keeps the GEMM indexing directly in terms of ``M`` and ``K``.
+# The descriptor must be created with ``conv_filter_shape=[R, S]`` so lowering
+# knows how to map ``logical_k`` back to ``r/s/c``.
+#
+# This variant shows the intended programming model. The production examples in
+# ``python/examples/gluon/02-conv-fprop.py`` use this form in an executable
+# warp-specialized kernel.
+
+
+@gluon.jit(do_not_specialize=[
+    "R",
+    "S",
+])
+def conv2d_im2col_logical_view_kernel(
+    in_desc,
+    weight_desc,
+    out_desc,
+    R,
+    S,
+    Ci,
+    MMAImpl: ttgl.constexpr,
+    BLOCK_M: ttgl.constexpr,
+    BLOCK_N: ttgl.constexpr,
+    BLOCK_K: ttgl.constexpr,
+    num_warps: ttgl.constexpr,
+):
+    """
+    Logical-view variant of the implicit GEMM convolution kernel.
+
+    Instead of passing physical ``[batch, h, w, c]`` coordinates and separate
+    ``[r, s]`` offsets, this form passes the logical im2col matrix coordinates
+    ``[M, K]`` directly to TMA.
+    """
+    dtype: ttgl.constexpr = in_desc.dtype
+
+    pid_m, pid_n = ttgl.program_id(0), ttgl.program_id(1)
+    offs_m = pid_m * BLOCK_M
+
+    a_smem, b_smem, mma, tma_bar = init_accumulator(in_desc, weight_desc, MMAImpl, dtype, BLOCK_M, BLOCK_N, num_warps)
+    phase = 0
+
+    ci_num_blocks = ttgl.cdiv(Ci, BLOCK_K)
+    total_k_iters = R * S * ci_num_blocks
+    for k_iter in range(total_k_iters):
+        ci_block, rs_idx = k_iter % ci_num_blocks, k_iter // ci_num_blocks
+        r, s = rs_idx // S, rs_idx % S
+        k_offset = r * S * Ci + s * Ci + ci_block * BLOCK_K
+
+        mbarrier.expect(tma_bar, in_desc.block_type.nbytes + weight_desc.block_type.nbytes)
+        tma.async_load_im2col(
+            in_desc,
+            [offs_m, k_offset],
+            tma_bar,
+            a_smem,
+        )
+        tma.async_load(weight_desc, [pid_n * BLOCK_N, k_offset], tma_bar, b_smem)
+        mbarrier.wait(tma_bar, phase=phase)
+
+        mma = mma.wait_num_outstanding(0)
+        mma = mma.issue_async_mma(a_smem, b_smem.permute((1, 0)))
+
+        phase ^= 1
+
+    mbarrier.invalidate(tma_bar)
+    store_output_tile(mma, dtype, out_desc, offs_m, pid_n * BLOCK_N)
+
+
+# %%
 # Host-Side Launcher
 # ------------------
 #
