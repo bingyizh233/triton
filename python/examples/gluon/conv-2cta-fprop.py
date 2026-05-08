@@ -561,7 +561,7 @@ def _conv2d_im2col_2cta_ws_v4_kernel(
     # the HW arrival pattern -- ``tcgen05_mma_barrier_count(..., multicast=True)``
     # computes it from the operand layouts.
     mma_barrier_count: gl.constexpr = tcgen05_mma_barrier_count(
-        [a_bufs.index(0), b_bufs.index(0)], multicast=True,
+        [a_bufs.index(0), b_bufs.index(0)], multicast=True, two_ctas=True,
     )
 
     N_CONSUMERS: gl.constexpr = 3  # load, mma, epilogue
