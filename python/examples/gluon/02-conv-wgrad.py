@@ -769,6 +769,19 @@ def _supports_wgrad_2cta_config(Ci, R, S, kernel_meta):
     )
 
 
+def _has_sufficient_wgrad_parallelism(M_spatial, Co, Ci, R, S, num_sms, kernel_meta):
+    active_split_k = _get_active_split_k(M_spatial, kernel_meta["BLOCK_K"], kernel_meta["SPLIT_K"])
+    if active_split_k > 1:
+        return True
+
+    # Wgrad has a small output tile space; avoid autotuning unsplit configs
+    # that launch fewer persistent work items than SMs.
+    co_blocks = triton.cdiv(Co, kernel_meta["BLOCK_M"])
+    ci_blocks = triton.cdiv(Ci, kernel_meta["BLOCK_N"])
+    output_tiles = co_blocks * R * S * ci_blocks
+    return output_tiles >= num_sms
+
+
 def _select_wgrad_kernel_meta(
     input_nhwc,
     grad_output_nhwc,
@@ -798,6 +811,10 @@ def _select_wgrad_kernel_meta(
     for config in conv2d_wgrad_get_configs(include_2cta=True, block_n_values=(128, 256)):
         kernel_meta = config.all_kwargs()
         if not _supports_wgrad_2cta_config(Ci, R, S, kernel_meta):
+            continue
+        if not _has_sufficient_wgrad_parallelism(
+            N * out_h * out_w, Co, Ci, R, S, num_sms, kernel_meta
+        ):
             continue
         ms = _benchmark_wgrad_config(
             input_nhwc,
