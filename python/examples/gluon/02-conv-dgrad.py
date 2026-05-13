@@ -477,8 +477,8 @@ def conv2d_dgrad_kernel(
 # ===-----------------------------------------------------------------------===#
 
 
-def conv2d_dgrad_get_configs():
-    return [
+def conv2d_dgrad_get_configs(include_2cta=False, block_n_values=(128, )):
+    configs = [
         triton.Config(
             {
                 "BLOCK_M": block_m,
@@ -500,6 +500,30 @@ def conv2d_dgrad_get_configs():
         for num_acc_buffers in (2, )
         for num_warps in (4, )
     ]
+    if include_2cta:
+        configs.extend([
+            triton.Config(
+                {
+                    "BLOCK_M": 256,
+                    "BLOCK_N": block_n,
+                    "BLOCK_K": block_k,
+                    "GROUP_SIZE_M": 4,
+                    "SPLIT_K": 1,
+                    "num_buffers": num_buffers,
+                    "num_acc_buffers": 2,
+                    "EPILOGUE_BLOCK_N": epilogue_block_n,
+                    "CGA_LAYOUT": ((1, 0),),
+                },
+                num_warps=4,
+                num_ctas=2,
+            )
+            for block_n in block_n_values
+            for block_k in (64, 128)
+            for epilogue_block_n in (32, 64, 128)
+            if block_n % epilogue_block_n == 0
+            for num_buffers in (3, 4, 5)
+        ])
+    return configs
 
 
 # ===-----------------------------------------------------------------------===#
@@ -970,6 +994,19 @@ def _benchmark_dgrad_config(
         return float("inf")
 
 
+def _supports_dgrad_2cta_config(N, H_sub, W_sub, Ci, Co, stride_h, stride_w, kernel_meta):
+    cga_layout = kernel_meta.get("CGA_LAYOUT", ())
+    if not cga_layout:
+        return True
+    return (
+        stride_h == 1 and stride_w == 1 and
+        kernel_meta["SPLIT_K"] == 1 and
+        (N * H_sub * W_sub) % kernel_meta["BLOCK_M"] == 0 and
+        Ci % kernel_meta["BLOCK_N"] == 0 and
+        Co % kernel_meta["BLOCK_K"] == 0
+    )
+
+
 def _select_dgrad_kernel_meta(
     grad_output_nhwc,
     W_rot_flat,
@@ -1012,8 +1049,10 @@ def _select_dgrad_kernel_meta(
 
     best_ms = float("inf")
     best_kernel_meta = None
-    for config in conv2d_dgrad_get_configs():
+    for config in conv2d_dgrad_get_configs(include_2cta=True, block_n_values=(128, 256)):
         kernel_meta = config.all_kwargs()
+        if not _supports_dgrad_2cta_config(N, H_sub, W_sub, Ci, Co, stride_h, stride_w, kernel_meta):
+            continue
         ms = _benchmark_dgrad_config(
             grad_output_nhwc,
             W_rot_flat,

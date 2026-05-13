@@ -440,8 +440,8 @@ def conv2d_wgrad_kernel(
 # ===-----------------------------------------------------------------------===#
 
 
-def conv2d_wgrad_get_configs(pre_hook=None):
-    return [
+def conv2d_wgrad_get_configs(pre_hook=None, include_2cta=False, block_n_values=(128, )):
+    configs = [
         triton.Config(
             {
                 "BLOCK_M": block_m,
@@ -462,6 +462,30 @@ def conv2d_wgrad_get_configs(pre_hook=None):
         for num_acc_buffers in (2, )
         for num_warps in (4, )
     ]
+    if include_2cta:
+        configs.extend([
+            triton.Config(
+                {
+                    "BLOCK_M": 256,
+                    "BLOCK_N": block_n,
+                    "BLOCK_K": block_k,
+                    "SPLIT_K": 1,
+                    "num_buffers": num_buffers,
+                    "num_acc_buffers": 2,
+                    "EPILOGUE_BLOCK_N": epilogue_block_n,
+                    "CGA_LAYOUT": ((1, 0),),
+                },
+                num_warps=4,
+                num_ctas=2,
+                pre_hook=pre_hook,
+            )
+            for block_n in block_n_values
+            for block_k in (64, 128)
+            for epilogue_block_n in (32, 64, 128)
+            if block_n % epilogue_block_n == 0
+            for num_buffers in (3, 4, 5)
+        ])
+    return configs
 
 
 # ===-----------------------------------------------------------------------===#
@@ -572,6 +596,12 @@ def _get_safe_wgrad_active_split_k(M_spatial, Co, K_GEMM, kernel_meta):
 
 def _allocate_wgrad_split_k_workspace(device, active_split_k, Co, K_GEMM):
     return torch.empty((active_split_k * Co, K_GEMM), device=device, dtype=torch.float32)
+
+
+def _wgrad_store_co(Co, kernel_meta):
+    if kernel_meta.get("CGA_LAYOUT", ()):
+        return triton.cdiv(Co, kernel_meta["BLOCK_M"]) * kernel_meta["BLOCK_M"]
+    return Co
 
 
 _wgrad_autotune_cache = {}
@@ -700,7 +730,9 @@ def _benchmark_wgrad_config(
     kernel_meta,
 ):
     try:
-        grad_weight_flat = torch.empty((Co, K_GEMM), device=input_nhwc.device, dtype=torch.float32)
+        grad_weight_flat = torch.empty((_wgrad_store_co(Co, kernel_meta), K_GEMM),
+                                       device=input_nhwc.device,
+                                       dtype=torch.float32)
         run = _make_wgrad_runner(
             input_nhwc,
             grad_output_nhwc,
@@ -725,6 +757,16 @@ def _benchmark_wgrad_config(
         return triton.testing.do_bench(run)
     except Exception:
         return float("inf")
+
+
+def _supports_wgrad_2cta_config(Ci, R, S, kernel_meta):
+    cga_layout = kernel_meta.get("CGA_LAYOUT", ())
+    if not cga_layout:
+        return True
+    return (
+        kernel_meta["SPLIT_K"] == 1 and
+        (R * S == 1 or Ci % kernel_meta["BLOCK_N"] == 0)
+    )
 
 
 def _select_wgrad_kernel_meta(
@@ -753,8 +795,10 @@ def _select_wgrad_kernel_meta(
 
     best_ms = float("inf")
     best_kernel_meta = None
-    for config in conv2d_wgrad_get_configs():
+    for config in conv2d_wgrad_get_configs(include_2cta=True, block_n_values=(128, 256)):
         kernel_meta = config.all_kwargs()
+        if not _supports_wgrad_2cta_config(Ci, R, S, kernel_meta):
+            continue
         ms = _benchmark_wgrad_config(
             input_nhwc,
             grad_output_nhwc,
@@ -892,8 +936,6 @@ def conv2d_wgrad(input_nhwc, grad_output_nhwc, R, S, stride=1, padding=0):
     (input_nhwc, grad_output_nhwc, Ci_orig, N, Ci, Co,
      out_h, out_w, stride_h, stride_w, pad_h, pad_w, K_GEMM) = \
         _prepare_wgrad_problem(input_nhwc, grad_output_nhwc, R, S, stride, padding)
-    grad_weight_flat = _allocate_wgrad_output(input_nhwc.device, Co, K_GEMM)
-
     num_sms = torch.cuda.get_device_properties(input_nhwc.device).multi_processor_count
 
     kernel_meta = _select_wgrad_kernel_meta(
@@ -913,6 +955,7 @@ def conv2d_wgrad(input_nhwc, grad_output_nhwc, R, S, stride=1, padding=0):
         K_GEMM=K_GEMM,
         num_sms=num_sms,
     )
+    grad_weight_flat = _allocate_wgrad_output(input_nhwc.device, _wgrad_store_co(Co, kernel_meta), K_GEMM)
     run = _make_wgrad_runner(
         input_nhwc,
         grad_output_nhwc,
