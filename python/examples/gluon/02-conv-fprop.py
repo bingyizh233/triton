@@ -383,8 +383,8 @@ def conv2d_fprop_kernel(
     ], [1, 1], [24, 24])
 
 
-def conv2d_fprop_get_configs(pre_hook=None):
-    return [
+def conv2d_fprop_get_configs(pre_hook=None, include_2cta=False):
+    configs = [
         triton.Config(
             {
                 "BLOCK_M": block_m,
@@ -405,6 +405,27 @@ def conv2d_fprop_get_configs(pre_hook=None):
         for num_acc_buffers in (2, )
         for num_warps in (4, )
     ]
+    if include_2cta:
+        configs.extend([
+            triton.Config(
+                {
+                    "BLOCK_M": 256,
+                    "BLOCK_N": 128,
+                    "BLOCK_K": block_k,
+                    "GROUP_SIZE_M": 4,
+                    "num_buffers": num_buffers,
+                    "num_acc_buffers": 2,
+                    "EPILOGUE_BLOCK_N": 128,
+                    "CGA_LAYOUT": ((1, 0),),
+                },
+                num_warps=4,
+                num_ctas=2,
+                pre_hook=pre_hook,
+            )
+            for block_k in (64, 128)
+            for num_buffers in (3, 4, 5)
+        ])
+    return configs
 
 
 def conv2d_fprop_tma_set_block_size_hook(nargs):
@@ -425,6 +446,15 @@ def conv2d_fprop_tma_set_block_size_hook(nargs):
 conv2d_fprop_autotuned_kernel = triton.autotune(
     configs=conv2d_fprop_get_configs(pre_hook=conv2d_fprop_tma_set_block_size_hook),
     key=["out_h", "out_w", "stride_h", "stride_w"],
+)(conv2d_fprop_kernel)
+
+
+# The 2CTA epilogue stores through TMA, so it is only safe when every output
+# tile is fully covered. This mixed autotune compares the normal single-CTA
+# configs with 2CTA configs, and the host calls it only for full-tile shapes.
+conv2d_fprop_autotuned_kernel_with_2cta = triton.autotune(
+    configs=conv2d_fprop_get_configs(pre_hook=conv2d_fprop_tma_set_block_size_hook, include_2cta=True),
+    key=["N", "Co", "out_h", "out_w", "stride_h", "stride_w"],
 )(conv2d_fprop_kernel)
 
 # ===-----------------------------------------------------------------------===#
@@ -562,6 +592,10 @@ def _launch_conv(
     )
 
 
+def _supports_2cta_fprop_autotune(M_GEMM, Co):
+    return M_GEMM % 256 == 0 and Co % 128 == 0
+
+
 def conv2d_fprop(input_tensor, weight_tensor, stride=1, padding=0, **kwargs):
     """Production fprop entrypoint.
 
@@ -589,8 +623,12 @@ def conv2d_fprop(input_tensor, weight_tensor, stride=1, padding=0, **kwargs):
         dummy_block_shape,
     )
 
+    kernel = conv2d_fprop_autotuned_kernel
+    if _supports_2cta_fprop_autotune(M_GEMM, Co):
+        kernel = conv2d_fprop_autotuned_kernel_with_2cta
+
     _launch_conv(
-        conv2d_fprop_autotuned_kernel,
+        kernel,
         _make_grid(num_sms, M_GEMM, N_GEMM),
         in_desc=in_desc,
         weight_desc=weight_desc,
