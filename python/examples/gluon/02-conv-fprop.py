@@ -424,8 +424,7 @@ def conv2d_fprop_get_configs(pre_hook=None, include_2cta=False, block_n_values=(
             )
             for block_n in block_n_values
             for block_k in (64, 128)
-            for epilogue_block_n in (32, 64, 128)
-            if block_n % epilogue_block_n == 0
+            for epilogue_block_n in (block_n, )
             for num_buffers in (3, 4, 5)
         ])
     return configs
