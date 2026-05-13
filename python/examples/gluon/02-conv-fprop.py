@@ -383,7 +383,7 @@ def conv2d_fprop_kernel(
     ], [1, 1], [24, 24])
 
 
-def conv2d_fprop_get_configs(pre_hook=None, include_2cta=False):
+def conv2d_fprop_get_configs(pre_hook=None, include_2cta=False, block_n_values=(128, )):
     configs = [
         triton.Config(
             {
@@ -410,19 +410,22 @@ def conv2d_fprop_get_configs(pre_hook=None, include_2cta=False):
             triton.Config(
                 {
                     "BLOCK_M": 256,
-                    "BLOCK_N": 128,
+                    "BLOCK_N": block_n,
                     "BLOCK_K": block_k,
                     "GROUP_SIZE_M": 4,
                     "num_buffers": num_buffers,
                     "num_acc_buffers": 2,
-                    "EPILOGUE_BLOCK_N": 128,
+                    "EPILOGUE_BLOCK_N": epilogue_block_n,
                     "CGA_LAYOUT": ((1, 0),),
                 },
                 num_warps=4,
                 num_ctas=2,
                 pre_hook=pre_hook,
             )
+            for block_n in block_n_values
             for block_k in (64, 128)
+            for epilogue_block_n in (32, 64, 128)
+            if block_n % epilogue_block_n == 0
             for num_buffers in (3, 4, 5)
         ])
     return configs
@@ -454,6 +457,16 @@ conv2d_fprop_autotuned_kernel = triton.autotune(
 # configs with 2CTA configs, and the host calls it only for full-tile shapes.
 conv2d_fprop_autotuned_kernel_with_2cta = triton.autotune(
     configs=conv2d_fprop_get_configs(pre_hook=conv2d_fprop_tma_set_block_size_hook, include_2cta=True),
+    key=["N", "Co", "out_h", "out_w", "stride_h", "stride_w"],
+)(conv2d_fprop_kernel)
+
+
+conv2d_fprop_autotuned_kernel_with_2cta_256 = triton.autotune(
+    configs=conv2d_fprop_get_configs(
+        pre_hook=conv2d_fprop_tma_set_block_size_hook,
+        include_2cta=True,
+        block_n_values=(128, 256),
+    ),
     key=["N", "Co", "out_h", "out_w", "stride_h", "stride_w"],
 )(conv2d_fprop_kernel)
 
@@ -592,8 +605,8 @@ def _launch_conv(
     )
 
 
-def _supports_2cta_fprop_autotune(M_GEMM, Co):
-    return M_GEMM % 256 == 0 and Co % 128 == 0
+def _supports_2cta_fprop_autotune(M_GEMM, Co, block_n):
+    return M_GEMM % 256 == 0 and Co % block_n == 0
 
 
 def conv2d_fprop(input_tensor, weight_tensor, stride=1, padding=0, **kwargs):
@@ -624,7 +637,9 @@ def conv2d_fprop(input_tensor, weight_tensor, stride=1, padding=0, **kwargs):
     )
 
     kernel = conv2d_fprop_autotuned_kernel
-    if _supports_2cta_fprop_autotune(M_GEMM, Co):
+    if _supports_2cta_fprop_autotune(M_GEMM, Co, 256):
+        kernel = conv2d_fprop_autotuned_kernel_with_2cta_256
+    elif _supports_2cta_fprop_autotune(M_GEMM, Co, 128):
         kernel = conv2d_fprop_autotuned_kernel_with_2cta
 
     _launch_conv(
