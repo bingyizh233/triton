@@ -1486,8 +1486,6 @@ struct AsyncTMACopyGlobalToLocalOpConversion
         im2colOffsets.append(lowered.offsets.begin(), lowered.offsets.end());
       } else {
         tmaCoords.append(adaptor.getCoord().begin(), adaptor.getCoord().end());
-        im2colOffsets.append(adaptor.getOffsets().begin(),
-                             adaptor.getOffsets().end());
       }
 
       int operandIdx = 3;
