@@ -1077,14 +1077,22 @@ def _assert_wgrad_correct(wgrad_fn, N, Ci, H, W, Co, R, S, stride, padding, **kw
     torch.testing.assert_close(triton_grad_w, ref_grad_w_nhwc, atol=1, rtol=0.01)
 
 
+WGRAD_2CTA_PARAMS = [
+    pytest.param(conv2d_wgrad_fixed, 1, 512, 32, 32, 384, 3, 3, 1, 1, id="2cta_n1_ci512_co384_r3s3"),
+    pytest.param(conv2d_wgrad_fixed, 128, 512, 8, 8, 384, 3, 3, 1, 1, id="2cta_n128_ci512_co384_r3s3"),
+    pytest.param(conv2d_wgrad_fixed, 1, 384, 32, 32, 384, 1, 1, 1, 0, id="2cta_1x1_ci384_co384"),
+]
+
+
 @pytest.mark.parametrize("wgrad_fn,N,Ci,H,W,Co,R,S,stride,padding", [
-    *[(conv2d_wgrad_fixed, N, Ci, H, W, Co, R, S, stride, padding)
-      for N in (1, 128)
-      for H, W in ((64, 64), (64, 32))
-      for Ci, Co in ((128, 128), (384, 384), (128, 384))
-      for R, S in ((1, 1), (2, 2), (3, 3), (1, 3))
-      for stride in (1, 2, 3)
-      for padding in (0, 1)], (conv2d_wgrad_fixed, 16, 5, 32, 32, 96, 3, 3, 1, 1),  # padded channels
+    *WGRAD_2CTA_PARAMS, *[(conv2d_wgrad_fixed, N, Ci, H, W, Co, R, S, stride, padding)
+                          for N in (1, 128)
+                          for H, W in ((64, 64), (64, 32))
+                          for Ci, Co in ((128, 128), (384, 384), (128, 384))
+                          for R, S in ((1, 1), (2, 2), (3, 3), (1, 3))
+                          for stride in (1, 2, 3)
+                          for padding in (0, 1)],
+    (conv2d_wgrad_fixed, 16, 5, 32, 32, 96, 3, 3, 1, 1),  # padded channels
     (conv2d_wgrad_fixed, 16, 96, 1, 8, 128, 1, 2, (1, 2), 0),  # asymmetric stride
     (conv2d_wgrad_fixed, 16, 512, 2, 2, 768, 2, 2, (2, 2), 0),  # small spatial
 ])

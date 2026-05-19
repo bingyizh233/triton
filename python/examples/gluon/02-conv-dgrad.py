@@ -1231,6 +1231,12 @@ def _assert_dgrad_correct(dgrad_fn, N, Ci, H, W, Co, R, S, stride, padding, **kw
     torch.testing.assert_close(triton_dgrad, ref_dgrad_nhwc, atol=1e-2, rtol=1e-2)
 
 
+DGRAD_2CTA_PARAMS = [
+    pytest.param(conv2d_dgrad_fixed, 1, 384, 32, 32, 512, 3, 3, 1, 1, id="2cta_n1_ci384_co512_r3s3"),
+    pytest.param(conv2d_dgrad_fixed, 128, 384, 8, 8, 512, 3, 3, 1, 1, id="2cta_n128_ci384_co512_r3s3"),
+    pytest.param(conv2d_dgrad_fixed, 1, 256, 32, 32, 384, 4, 4, 1, 1, id="2cta_ci256_co384_r4s4"),
+]
+
 DGRAD_SHAPE_PARAMS = [
     *[(N, Ci, 64, 64, Co, R, S, stride, padding)
       for N in (1, 128)
@@ -1248,7 +1254,7 @@ DGRAD_SHAPE_PARAMS = [
 
 @pytest.mark.parametrize(
     "dgrad_fn,N,Ci,H,W,Co,R,S,stride,padding",
-    [(conv2d_dgrad_fixed, *shape) for shape in DGRAD_SHAPE_PARAMS],
+    [*DGRAD_2CTA_PARAMS, *[(conv2d_dgrad_fixed, *shape) for shape in DGRAD_SHAPE_PARAMS]],
 )
 @pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell GPU (SM 10.x)")
 def test_op(dgrad_fn, N, Ci, H, W, Co, R, S, stride, padding):

@@ -755,13 +755,21 @@ def _assert_conv_fprop_correct(fprop_fn, N, Ci, H, W, Co, R, S, stride, padding,
     torch.testing.assert_close(triton_out, torch_out, atol=5e-2, rtol=5e-2)
 
 
+FPROP_2CTA_PARAMS = [
+    pytest.param(conv2d_fprop_fixed, 1, 384, 32, 32, 512, 3, 3, 1, 1, id="2cta_n1_ci384_co512_r3s3"),
+    pytest.param(conv2d_fprop_fixed, 128, 384, 8, 8, 512, 3, 3, 1, 1, id="2cta_n128_ci384_co512_r3s3"),
+    pytest.param(conv2d_fprop_fixed, 1, 416, 32, 32, 512, 3, 3, 1, 1, id="2cta_padded_ci416_co512"),
+]
+
+
 @pytest.mark.parametrize("fprop_fn,N,Ci,H,W,Co,R,S,stride,padding", [
-    *[(conv2d_fprop_fixed, N, Ci, 64, 64, Co, R, S, stride, padding)
-      for N in (1, 128)
-      for Ci, Co in ((384, 384), (416, 416))
-      for R, S in ((3, 3), (4, 4), (5, 5))
-      for stride in (1, 2)
-      for padding in (0, 1)], (conv2d_fprop_fixed, 1, 96, 1, 8, 128, 1, 2, (1, 2), 0),  # asymmetric stride
+    *FPROP_2CTA_PARAMS, *[(conv2d_fprop_fixed, N, Ci, 64, 64, Co, R, S, stride, padding)
+                          for N in (1, 128)
+                          for Ci, Co in ((384, 384), (416, 416))
+                          for R, S in ((3, 3), (4, 4), (5, 5))
+                          for stride in (1, 2)
+                          for padding in (0, 1)],
+    (conv2d_fprop_fixed, 1, 96, 1, 8, 128, 1, 2, (1, 2), 0),  # asymmetric stride
     (conv2d_fprop_fixed, 16, 5, 32, 32, 96, 3, 3, 1, 1),  # padded channels
 ])
 @pytest.mark.skipif(not is_blackwell(), reason="Requires Blackwell GPU (SM 10.x)")
